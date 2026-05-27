@@ -1,0 +1,1989 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Report Automation</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.9/babel.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&display=swap" rel="stylesheet">
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:'Inter',sans-serif;background:#f7fafc;display:flex;height:100vh;overflow:hidden}
+#root{display:flex;width:100%;height:100%}
+input:focus,textarea:focus,select:focus{border-color:#1b9aaa!important;outline:none;box-shadow:0 0 0 3px rgba(27,154,170,0.12)}
+::-webkit-scrollbar{width:5px}::-webkit-scrollbar-track{background:transparent}::-webkit-scrollbar-thumb{background:#c0d0dc;border-radius:3px}
+.tbl-input{width:100%;padding:5px 8px;border:1px solid #dde5eb;border-radius:5px;font-size:12px;font-family:inherit;background:#fff;box-sizing:border-box;min-width:60px}
+.tbl-input:focus{border-color:#1b9aaa;outline:none}
+.tbl-cell-sel .tbl-input{background:#dbeafe!important;}
+.tbl-cell-sel{background:#dbeafe!important;}
+@keyframes fadeUp{from{opacity:0;transform:translateY(14px)}to{opacity:1;transform:translateY(0)}}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:0.25}}
+@keyframes spin{to{transform:rotate(360deg)}}
+.fade-up{animation:fadeUp 0.35s cubic-bezier(0.16,1,0.3,1) both}
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const {useState,useRef,useCallback,useEffect,useMemo}=React;
+
+// ─── SECTION DEFINITIONS ────────────────────────────────────────────────────
+const SECTION_DEFS=[
+  {id:'cpu',      name:'CPU Utilization',      defaultRec:'CPU utilization is within acceptable range. Continue monitoring for any spikes during peak hours.'},
+  {id:'memory',   name:'Memory Utilization',   defaultRec:'Memory usage is within acceptable limits. Monitor for any unusual consumption patterns.'},
+  {id:'mountpoint',name:'Mount Point Usage',   defaultRec:'Continually check mount point usage and add more space or housekeep if reaching critical thresholds (>85%).'},
+  {id:'tablespace',name:'Tablespace Status',   defaultRec:'Consider resizing or adding more datafiles for tablespaces with usage above 85%.'},
+  {id:'datafile', name:'Data File Info',       defaultRec:'Data file I/O is within normal parameters.'},
+  {id:'dbgrowth', name:'Database Growth',      defaultRec:'Database growth is consistent with expected trends.'},
+  {id:'sessions', name:'Current Sessions',     defaultRec:'Session count is within normal range.'},
+  {id:'fileio',   name:'File I/O Utilization', defaultRec:'Datafile I/O throughput is within acceptable parameters.'},
+  {id:'invalid',  name:'Invalid Objects',      defaultRec:'No critical invalid objects found.'},
+  {id:'optimizer',name:'Optimizer',            defaultRec:'Optimizer statistics are up to date.'},
+  {id:'parallel', name:'Parallel',             defaultRec:'Parallel execution settings are appropriate.'},
+  {id:'analyze',  name:'Analyze and Housekeep',defaultRec:'Trace and dump files reviewed. No abnormal activity.'},
+  {id:'parameters',name:'Parameter Review',   defaultRec:'Database initialization parameters are properly configured.'},
+  {id:'sgamemory',name:'SGA Memory',           defaultRec:'SGA memory allocation is adequate.'},
+  {id:'dataguard',name:'Dataguard Review',     defaultRec:'Dataguard synchronization is operating normally.'},
+  {id:'redo',     name:'Redo Transaction',     defaultRec:'Redo log transaction volume is within expected range.'},
+  {id:'rman',     name:'RMAN Backup Status',   defaultRec:'RMAN backup completed successfully.'},
+  {id:'performance',name:'Performance Review', defaultRec:'Overall database performance metrics are within acceptable thresholds.'},
+];
+
+const defaultSectionsConfig=SECTION_DEFS.map(sd=>({
+  id:sd.id,name:sd.name,enabled:true,
+  contentType:sd.id==='cpu'?'image':'table',
+  defaultRec:sd.defaultRec,isCustom:false,
+}));
+
+// ─── STYLE TOKENS ───────────────────────────────────────────────────────────
+const S={
+  card:{background:'#fff',borderRadius:14,padding:24,boxShadow:'0 1px 6px rgba(13,27,42,0.07)',border:'1px solid #e2eaf0'},
+  pb:{background:'linear-gradient(135deg,#0f4c75,#1b9aaa)',color:'#fff',border:'none',borderRadius:10,padding:'11px 24px',cursor:'pointer',fontSize:13,fontWeight:700,display:'inline-flex',alignItems:'center',gap:8,boxShadow:'0 2px 8px rgba(15,76,117,0.25)'},
+  ab:{background:'none',border:'1px dashed #b0c4d0',borderRadius:8,padding:'7px 14px',cursor:'pointer',display:'inline-flex',alignItems:'center',gap:6,fontSize:12,color:'#1b9aaa',fontWeight:600,marginTop:8},
+  lb:{display:'block',fontSize:11,fontWeight:600,color:'#5a7184',marginBottom:3,marginTop:10},
+  inp:{width:'100%',padding:'9px 12px',border:'1px solid #d0dce4',borderRadius:8,fontSize:13,color:'#1a2b3c',background:'#fafcff',outline:'none',fontFamily:"'Inter',sans-serif"},
+  tag:{display:'inline-flex',alignItems:'center',gap:4,padding:'3px 10px',borderRadius:20,fontSize:11,fontWeight:700},
+};
+
+// ─── SMART RECOMMENDATIONS ───────────────────────────────────────────────────
+function getSmartRec(id, secData, flags, cpuUtils){
+  const rows=secData?.tableRows||[];
+  const cols=secData?.tableColumns||[];
+  const def=SECTION_DEFS.find(s=>s.id===id)?.defaultRec||'';
+
+  switch(id){
+    case 'tablespace':{
+      // cols: Status, Tablespace, Curr Size (MB), Used (MB), Used %, Free (MB)
+      const pI=cols.indexOf('Used %')>=0?cols.indexOf('Used %'):4;
+      const nI=cols.indexOf('Tablespace')>=0?cols.indexOf('Tablespace'):1;
+      const crit=rows.filter(r=>parseFloat(r[pI])>95);
+      const warn=rows.filter(r=>parseFloat(r[pI])>85&&parseFloat(r[pI])<=95);
+      if(!rows.length) return def;
+      if(crit.length){
+        const names=crit.map(r=>`${r[nI]} (${r[pI]})`).join(', ');
+        return `Critical: ${names} ${crit.length===1?'is':'are'} critically full. Add datafiles or resize immediately.`
+          +(warn.length?` Also monitor: ${warn.map(r=>r[nI]).join(', ')}.`:'');
+      }
+      if(warn.length){
+        const names=warn.map(r=>`${r[nI]} (${r[pI]})`).join(', ');
+        return `${names} ${warn.length===1?'is':'are'} above 85% usage. Consider adding datafiles or resizing before reaching critical levels.`;
+      }
+      return 'All tablespaces are within acceptable usage limits. Continue regular monitoring.';
+    }
+    case 'mountpoint':{
+      // cols: Filesystem, Size, Used, Available, Use%, Mounted On
+      const pI=cols.indexOf('Use%')>=0?cols.indexOf('Use%'):4;
+      const mI=cols.indexOf('Mounted On')>=0?cols.indexOf('Mounted On'):5;
+      const crit=rows.filter(r=>parseFloat(r[pI])>95);
+      const warn=rows.filter(r=>parseFloat(r[pI])>85&&parseFloat(r[pI])<=95);
+      if(!rows.length) return def;
+      if(crit.length){
+        const names=crit.map(r=>`${r[mI]} (${r[pI]})`).join(', ');
+        return `Critical: ${names} ${crit.length===1?'is':'are'} critically full. Immediate housekeeping or capacity expansion required.`
+          +(warn.length?` Also monitor: ${warn.map(r=>r[mI]).join(', ')}.`:'');
+      }
+      if(warn.length){
+        const names=warn.map(r=>`${r[mI]} (${r[pI]})`).join(', ');
+        return `${names} ${warn.length===1?'is':'are'} above 85% capacity. Schedule housekeeping or capacity expansion.`;
+      }
+      return 'All mount points are within acceptable usage. Continue monitoring at regular intervals.';
+    }
+    case 'rman':{
+      // cols: Type, Status, Start Time, ...
+      const sI=cols.indexOf('Status')>=0?cols.indexOf('Status'):1;
+      const tI=cols.indexOf('Type')>=0?cols.indexOf('Type'):0;
+      const dtI=cols.indexOf('Start Time')>=0?cols.indexOf('Start Time'):2;
+      if(!rows.length) return def;
+      const failed=rows.filter(r=>{const s=(r[sI]||'').trim().toUpperCase();return s&&!['COMPLETED','COMPLETED WITH WARNINGS',''].includes(s);});
+      if(failed.length){
+        const list=failed.map(r=>`${r[tI]} (${r[sI]}, ${r[dtI]})`).join('; ');
+        return `Action required: the following backup job${failed.length>1?'s':''} did not complete successfully — ${list}. Investigate and resolve immediately.`;
+      }
+      return 'All RMAN backup jobs completed successfully within the reporting period.';
+    }
+    case 'sessions':{
+      // cols: Instance, Peak Current, Max Allowed, Used %
+      const pI=cols.indexOf('Used %')>=0?cols.indexOf('Used %'):3;
+      const iI=cols.indexOf('Instance')>=0?cols.indexOf('Instance'):0;
+      if(!rows.length) return def;
+      const crit=rows.filter(r=>parseFloat(r[pI])>95);
+      const warn=rows.filter(r=>parseFloat(r[pI])>90&&parseFloat(r[pI])<=95);
+      if(crit.length){
+        const names=crit.map(r=>`${r[iI]} (${r[pI]})`).join(', ');
+        return `Critical: ${names} session utilization is critically high. Review and terminate idle sessions immediately, or increase the SESSIONS parameter.`;
+      }
+      if(warn.length){
+        const names=warn.map(r=>`${r[iI]} (${r[pI]})`).join(', ');
+        return `${names} session utilization is above 90%. Monitor closely and consider increasing the SESSIONS parameter if the trend continues.`;
+      }
+      return 'Session counts are within normal range for all instances.';
+    }
+    case 'cpu':{
+      const cpuRows=cpuUtils?.rows||[];
+      const cpuCols=cpuUtils?.columns||[];
+      const mI=cpuCols.findIndex(c=>/max/i.test(c));
+      if(mI>=0&&cpuRows.length){
+        const peak=Math.max(...cpuRows.map(r=>parseFloat(r[mI])||0));
+        if(peak>90) return `Critical CPU utilization detected — peak at ${peak.toFixed(1)}%. Immediate investigation required. Review top SQL, active sessions, and consider workload rescheduling.`;
+        if(peak>80) return `Elevated CPU utilization detected — peak at ${peak.toFixed(1)}%. Monitor closely and review resource-intensive queries. Consider scheduling heavy workloads during off-peak hours.`;
+        if(peak>60) return `CPU utilization peaks at ${peak.toFixed(1)}%, within manageable range. Continue monitoring during peak business hours.`;
+        return `CPU utilization is within acceptable range (peak ${peak.toFixed(1)}%). No action required.`;
+      }
+      return def;
+    }
+    case 'dataguard':{
+      // cols: Property, Value — rows include Database Role, Open Mode, MRP0 Status, etc.
+      const roleRow=rows.find(r=>r[0]==='Database Role');
+      const mrpRow=rows.find(r=>r[0]==='MRP0 Status');
+      const role=(roleRow?.[1]||'').toUpperCase();
+      const mrp=(mrpRow?.[1]||'');
+      if(!rows.length) return def;
+      if(role.includes('STANDBY')){
+        if(mrp==='APPLYING_LOG') return 'Dataguard MRP process is actively applying logs. Synchronization is operating normally.';
+        if(mrp&&mrp!=='N/A (Primary)') return `Dataguard MRP process status is "${mrp}" — not actively applying logs. Investigate synchronization and ensure the standby is receiving and applying redo data.`;
+      }
+      if(role==='PRIMARY') return 'Database is in PRIMARY role. Confirm standby synchronization is monitored separately.';
+      return def;
+    }
+    case 'redo':{
+      // cols: Thread, Date, Day, Total Switches
+      const swI=cols.indexOf('Total Switches')>=0?cols.indexOf('Total Switches'):3;
+      if(!rows.length) return def;
+      const maxSw=Math.max(...rows.map(r=>parseInt(r[swI])||0));
+      if(maxSw>50) return `High redo log switch frequency detected — up to ${maxSw} switches in a single day. Consider increasing redo log file sizes to reduce switch frequency and I/O overhead.`;
+      if(maxSw>24) return `Redo log switches peak at ${maxSw}/day (more than once per hour). Monitor and consider resizing redo logs if this is a recurring pattern.`;
+      return `Redo log switch frequency is within normal range (max ${maxSw}/day). No action required.`;
+    }
+    case 'invalid':{
+      if(!rows.length) return 'No invalid objects found in the database.';
+      return `Found ${rows.length} invalid object${rows.length>1?'s':''} in the database. Review and recompile as needed using DBMS_UTILITY.COMPILE_SCHEMA or manual ALTER ... COMPILE statements.`;
+    }
+    default: return def;
+  }
+}
+
+// ─── TEMPLATE STORAGE ────────────────────────────────────────────────────────
+const uint8ToB64=u8=>{let s='';for(let i=0;i<u8.length;i++)s+=String.fromCharCode(u8[i]);return btoa(s);};
+
+const sto={
+  getTemplates:()=>JSON.parse(localStorage.getItem('ra_templates')||'[]'),
+  saveTemplate:(name,meta)=>{
+    const list=sto.getTemplates();
+    const existing=list.findIndex(t=>t.name===name);
+    const entry={id:existing>=0?list[existing].id:Date.now().toString(),name,savedAt:new Date().toISOString().split('T')[0],meta};
+    if(existing>=0)list[existing]=entry;else list.push(entry);
+    localStorage.setItem('ra_templates',JSON.stringify(list));
+  },
+  deleteTemplate:id=>{localStorage.setItem('ra_templates',JSON.stringify(sto.getTemplates().filter(t=>t.id!==id)));},
+};
+
+// ─── SHARED MICRO-COMPONENTS ─────────────────────────────────────────────────
+function DI({label,value,onChange,style,multi,...props}){
+  const[l,sL]=useState(value||"");const r=useRef(null);const f=useRef(false);
+  useEffect(()=>{if(!f.current)sL(value||"")},[value]);
+  const Tag=multi?"textarea":"input";
+  return(<div style={style}>{label&&<label style={S.lb}>{label}</label>}
+    <Tag ref={r} value={l} onChange={e=>sL(e.target.value)} onFocus={()=>{f.current=true}} onBlur={()=>{f.current=false;if(l!==(value||""))onChange(l)}}
+      style={{...S.inp,...(multi?{minHeight:68,resize:'vertical'}:{})}} {...props}/></div>);
+}
+function DTA(p){return <DI {...p} multi={true}/>}
+
+function TblCell({value,onChange,onEnter,onPasteGrid,ri,ci,selRange,setSelStart,setSelEnd,isDragging,setDragging}){
+  const[l,sL]=useState(value||"");const f=useRef(false);
+  useEffect(()=>{if(!f.current)sL(value||"")},[value]);
+  const sel=selRange&&ri>=Math.min(selRange[0].ri,selRange[1].ri)&&ri<=Math.max(selRange[0].ri,selRange[1].ri)&&ci>=Math.min(selRange[0].ci,selRange[1].ci)&&ci<=Math.max(selRange[0].ci,selRange[1].ci);
+  const handlePaste=e=>{
+    const txt=e.clipboardData.getData('text/plain');
+    if(!txt.includes('\t')&&!txt.includes('\n'))return;
+    e.preventDefault();
+    const grid=txt.trimEnd().split('\n').map(r=>r.replace(/\r$/,'').split('\t'));
+    onPasteGrid(ri,ci,grid);
+  };
+  return <input className="tbl-input" value={l} title={l}
+    style={{background:sel?'#bfdbfe':undefined,cursor:'default'}}
+    onChange={e=>sL(e.target.value)}
+    onFocus={()=>{f.current=true}}
+    onBlur={()=>{f.current=false;if(l!==(value||""))onChange(l)}}
+    onKeyDown={e=>{
+      if(e.key==="Enter"){e.preventDefault();if(onEnter)onEnter(l)}
+      if((e.key==="Delete"||e.key==="Backspace")&&sel&&selRange&&!(selRange[0].ri===selRange[1].ri&&selRange[0].ci===selRange[1].ci)){e.preventDefault();onChange("")}
+    }}
+    onMouseDown={e=>{if(e.shiftKey){e.preventDefault();setSelEnd({ri,ci});}else{setSelStart({ri,ci});setSelEnd({ri,ci});setDragging(true);}}}
+    onMouseEnter={()=>{if(isDragging)setSelEnd({ri,ci});}}
+    onMouseUp={()=>setDragging(false)}
+    onPaste={handlePaste}/>;
+}
+function TblHeader({value,onChange}){
+  const[l,sL]=useState(value||"");const f=useRef(false);
+  useEffect(()=>{if(!f.current)sL(value||"")},[value]);
+  return <input value={l} onChange={e=>sL(e.target.value)}
+    onFocus={()=>{f.current=true}} onBlur={()=>{f.current=false;if(l!==(value||""))onChange(l)}}
+    style={{background:'transparent',border:'none',color:'#fff',fontWeight:700,fontSize:11,width:'100%',outline:'none',fontFamily:'inherit'}}/>;
+}
+
+function TableEditor({columns,rows,onColumnsChange,onRowsChange}){
+  const[selStart,setSelStart]=useState(null);
+  const[selEnd,setSelEnd]=useState(null);
+  const[dragging,setDragging]=useState(false);
+  const selRange=selStart&&selEnd?[selStart,selEnd]:null;
+  const updateCell=(ri,ci,v)=>{const nr=rows.map(r=>[...r]);if(!nr[ri])return;nr[ri][ci]=v;onRowsChange(nr)};
+  const addRow=()=>onRowsChange([...rows,columns.map(()=>"")]);
+  const removeRow=i=>{onRowsChange(rows.filter((_,j)=>j!==i));setSelStart(null);setSelEnd(null)};
+  const addCol=()=>{const n="Col "+(columns.length+1);onColumnsChange([...columns,n]);onRowsChange(rows.map(r=>[...r,""]))};
+  const removeCol=ci=>{onColumnsChange(columns.filter((_,j)=>j!==ci));onRowsChange(rows.map(r=>r.filter((_,j)=>j!==ci)));setSelStart(null);setSelEnd(null)};
+  const updateColName=(ci,v)=>{const nc=[...columns];nc[ci]=v;onColumnsChange(nc)};
+  const pasteGrid=(startRi,startCi,grid)=>{
+    const newCols=[...columns];
+    const newRows=rows.map(r=>[...r]);
+    grid.forEach((gr,dri)=>{
+      const tri=startRi+dri;
+      while(newRows.length<=tri)newRows.push(newCols.map(()=>""));
+      gr.forEach((cell,dci)=>{
+        const tci=startCi+dci;
+        while(newCols.length<=tci)newCols.push("Col "+(newCols.length+1));
+        while(newRows[tri].length<=tci)newRows[tri].push("");
+        newRows[tri][tci]=cell;
+      });
+    });
+    onColumnsChange(newCols);onRowsChange(newRows);
+  };
+  const colW=Math.max(80,Math.min(180,Math.floor(600/Math.max(columns.length,1))));
+  if(!columns.length)return(
+    <div style={{marginTop:8}}>
+      <button onClick={()=>{onColumnsChange(['Column 1','Column 2']);onRowsChange([['','']])}} style={S.ab}>+ Initialize Table</button>
+      <span style={{fontSize:11,color:'#7a8f9e',marginLeft:8}}>or paste from Excel below</span>
+      <PasteZone onPaste={(grid)=>{onColumnsChange(grid[0].map((_,i)=>'Col '+(i+1)));onRowsChange(grid)}}/>
+    </div>
+  );
+  return(
+    <div style={{marginTop:8,marginBottom:4}} onMouseLeave={()=>setDragging(false)}>
+      <div style={{fontSize:10,color:'#7a8f9e',marginBottom:4}}>Click cell to edit · Shift+click to extend selection · Paste Excel/TSV data directly</div>
+      <div style={{overflowX:'auto'}}>
+        <table style={{borderCollapse:'collapse',fontSize:12,tableLayout:'fixed'}}>
+          <colgroup>{columns.map((_,ci)=><col key={ci} style={{width:colW}}/>)}<col style={{width:28}}/></colgroup>
+          <thead><tr>
+            {columns.map((c,ci)=>(
+              <th key={ci} style={{background:'#0f4c75',color:'#fff',padding:'6px 8px',border:'1px solid #0a3a5c',position:'relative',width:colW,maxWidth:colW}}>
+                <TblHeader value={c} onChange={v=>updateColName(ci,v)}/>
+                {columns.length>1&&<button onClick={()=>removeCol(ci)} style={{position:'absolute',top:2,right:2,background:'rgba(255,255,255,0.2)',border:'none',borderRadius:3,color:'#fff',cursor:'pointer',fontSize:9,padding:'1px 4px'}}>×</button>}
+              </th>
+            ))}
+            <th style={{background:'#0f4c75',padding:'6px 4px',border:'1px solid #0a3a5c',width:28}}>
+              <button onClick={addCol} style={{background:'rgba(255,255,255,0.2)',border:'none',borderRadius:3,color:'#fff',cursor:'pointer',fontSize:13,padding:'0 4px'}} title="Add column">+</button>
+            </th>
+          </tr></thead>
+          <tbody>
+            {rows.map((row,ri)=>(
+              <tr key={ri}>
+                {(row||[]).map((cell,ci)=>(
+                  <td key={ci} style={{border:'1px solid #dde5eb',padding:2,width:colW,maxWidth:colW,overflow:'hidden'}}>
+                    <TblCell value={cell} onChange={v=>updateCell(ri,ci,v)} ri={ri} ci={ci}
+                      selRange={selRange} setSelStart={setSelStart} setSelEnd={setSelEnd}
+                      isDragging={dragging} setDragging={setDragging}
+                      onPasteGrid={pasteGrid}
+                      onEnter={()=>{if(ri===rows.length-1)addRow()}}/>
+                  </td>
+                ))}
+                <td style={{border:'1px solid #dde5eb',padding:2,textAlign:'center',width:28}}>
+                  <button onClick={()=>removeRow(ri)} style={{background:'none',border:'none',color:'#d44',cursor:'pointer',fontSize:13}}>×</button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <div style={{display:'flex',gap:8,alignItems:'center',marginTop:6}}>
+        <button onClick={addRow} style={{...S.ab,padding:'4px 10px',fontSize:11,marginTop:0}}>+ Row</button>
+        {selRange&&(selRange[0].ri!==selRange[1].ri||selRange[0].ci!==selRange[1].ci)&&(
+          <button onClick={()=>{
+            const nr=rows.map(r=>[...r]);
+            for(let r=Math.min(selRange[0].ri,selRange[1].ri);r<=Math.max(selRange[0].ri,selRange[1].ri);r++)
+              for(let c=Math.min(selRange[0].ci,selRange[1].ci);c<=Math.max(selRange[0].ci,selRange[1].ci);c++)
+                if(nr[r])nr[r][c]="";
+            onRowsChange(nr);
+          }} style={{...S.ab,padding:'4px 10px',fontSize:11,marginTop:0,color:'#e53e3e',borderColor:'#fca5a5'}}>Clear Selection</button>
+        )}
+      </div>
+      <PasteZone onPaste={(grid)=>{
+        const newCols=grid[0].map((_,i)=>columns[i]||'Col '+(i+1));
+        onColumnsChange(newCols);onRowsChange(grid);
+      }}/>
+    </div>
+  );
+}
+function PasteZone({onPaste}){
+  const[hover,setHover]=useState(false);
+  const handlePaste=e=>{
+    const txt=e.clipboardData.getData('text/plain');
+    if(!txt.trim())return;
+    const grid=txt.trimEnd().split('\n').map(r=>r.replace(/\r$/,'').split('\t'));
+    if(grid.length>0&&grid[0].length>1)onPaste(grid);
+  };
+  return(
+    <div onPaste={handlePaste} onDragOver={e=>e.preventDefault()} onDrop={e=>{e.preventDefault();const t=e.dataTransfer.getData('text/plain');if(t){const grid=t.trimEnd().split('\n').map(r=>r.replace(/\r$/,'').split('\t'));if(grid[0]?.length>1)onPaste(grid);}}}
+      onFocus={()=>setHover(true)} onBlur={()=>setHover(false)} onMouseEnter={()=>setHover(true)} onMouseLeave={()=>setHover(false)}
+      contentEditable suppressContentEditableWarning tabIndex={0}
+      style={{marginTop:6,padding:'7px 12px',border:`1px dashed ${hover?'#1b9aaa':'#b0c4d0'}`,borderRadius:7,fontSize:11,color:'#7a8f9e',background:hover?'#f0fafb':'#fafcff',cursor:'text',outline:'none',userSelect:'none'}}
+      onInput={e=>e.currentTarget.textContent=''}>
+      Paste Excel / TSV data here to replace table
+    </div>
+  );
+}
+
+// ─── CPU CHART (ported from original app) ──────────────────────────────────
+function CpuChart({columns,rows,onCanvasReady}){
+  const cvRef=useRef(null);const chRef=useRef(null);
+  const[instFilter,setInstFilter]=useState('All');
+  const[fromDate,setFromDate]=useState('');const[toDate,setToDate]=useState('');
+  const[groupBy,setGroupBy]=useState('none');
+  const gi=pat=>columns.findIndex(c=>new RegExp(pat,'i').test(c));
+  const instIdx=gi('instance');const lIdx=gi('begin')!==-1?gi('begin'):gi('snap')!==-1?gi('snap'):0;
+  const mIdx=gi('max');const aIdx=gi('avg');
+  const instances=instIdx!==-1?['All',...[...new Set(rows.map(r=>r[instIdx]).filter(Boolean))].sort()]:['All'];
+  const parseDate=s=>{const[d,m,y]=s.split('/');return new Date(+y,+m-1,+d)};
+  const toN=v=>{const n=parseFloat(v);return isNaN(n)?null:n};
+  let r=(instFilter==='All'||instIdx===-1)?rows:rows.filter(row=>row[instIdx]===instFilter);
+  if(fromDate||toDate){r=r.filter(row=>{const d=(row[lIdx]||'').slice(0,10);if(!d)return true;const dt=parseDate(d);if(fromDate&&fromDate.length===10&&dt<parseDate(fromDate))return false;if(toDate&&toDate.length===10&&dt>parseDate(toDate))return false;return true})}
+  const applyGroupBy=src=>{
+    if(groupBy==='none')return src;
+    const map=new Map();
+    src.forEach(row=>{let label;if(groupBy==='date')label=(row[lIdx]||'').slice(0,10);else{const hm=(row[lIdx]||'').match(/(\d{2}):\d{2}/);label=hm?hm[1]+':00':null}
+    if(!label)return;if(!map.has(label))map.set(label,{maxVals:[],avgVals:[]});
+    const g=map.get(label);const mv=toN(row[mIdx]);if(mv!==null)g.maxVals.push(mv);const av=toN(row[aIdx]);if(av!==null)g.avgVals.push(av)});
+    return[...map.entries()].map(([label,g])=>{const out=Array(columns.length).fill('');out[lIdx]=label;out[mIdx]=g.maxVals.length?Math.max(...g.maxVals).toFixed(2):'';out[aIdx]=g.avgVals.length?(g.avgVals.reduce((a,b)=>a+b,0)/g.avgVals.length).toFixed(2):'';return out})};
+  const displayRows=applyGroupBy(r);
+  useEffect(()=>{
+    if(!cvRef.current||!displayRows.length||typeof Chart==='undefined')return;
+    const ctx=cvRef.current.getContext('2d');if(chRef.current)chRef.current.destroy();
+    chRef.current=new Chart(ctx,{type:'line',data:{labels:displayRows.map(row=>row[lIdx]??''),datasets:[
+      {label:'Max CPU%',data:displayRows.map(row=>toN(row[mIdx])),borderColor:'#d44',backgroundColor:'rgba(212,68,68,0.08)',tension:0.3,fill:true,pointRadius:2,borderWidth:2},
+      {label:'Avg CPU%',data:displayRows.map(row=>toN(row[aIdx])),borderColor:'#1b9aaa',backgroundColor:'rgba(27,154,170,0.08)',tension:0.3,fill:true,pointRadius:2,borderWidth:2}
+    ]},options:{responsive:false,plugins:{legend:{position:'top'}},scales:{y:{min:0,max:100,title:{display:true,text:'CPU %'},grid:{color:'#e8f1f5'}},x:{ticks:{maxRotation:45,font:{size:9}},grid:{color:'#e8f1f5'}}}}});
+    if(onCanvasReady)onCanvasReady(cvRef.current);
+    return()=>{if(chRef.current){chRef.current.destroy();chRef.current=null}};
+  },[JSON.stringify(displayRows),JSON.stringify(columns)]);
+  const ss={fontSize:11,padding:'2px 6px',borderRadius:4,border:'1px solid #c8d8e4',outline:'none',background:'#fff'};
+  const lbl={fontSize:11,color:'#5a7184',margin:0};
+  return(
+    <div style={{marginTop:8,padding:'10px 12px',background:'#f8fbff',borderRadius:8,border:'1px solid #e2eaf0'}}>
+      <div style={{display:'flex',alignItems:'center',gap:10,marginBottom:8,flexWrap:'wrap'}}>
+        <span style={{fontSize:12,fontWeight:700,color:'#0f4c75'}}>CPU Utilization Chart</span>
+        {instances.length>1&&(<div style={{display:'flex',alignItems:'center',gap:4}}><label style={lbl}>Instance:</label>
+          <select value={instFilter} onChange={e=>setInstFilter(e.target.value)} style={ss}>
+            {instances.map(i=><option key={i} value={i}>{i==='All'?'All Instances':`Instance ${i}`}</option>)}
+          </select></div>)}
+        <div style={{display:'flex',alignItems:'center',gap:4}}>
+          <label style={lbl}>From:</label><input value={fromDate} onChange={e=>setFromDate(e.target.value)} placeholder="DD/MM/YYYY" style={{...ss,width:88}} maxLength={10}/>
+          <label style={lbl}>To:</label><input value={toDate} onChange={e=>setToDate(e.target.value)} placeholder="DD/MM/YYYY" style={{...ss,width:88}} maxLength={10}/>
+        </div>
+        <div style={{display:'flex',alignItems:'center',gap:4}}><label style={lbl}>Group:</label>
+          <select value={groupBy} onChange={e=>setGroupBy(e.target.value)} style={ss}>
+            <option value="none">None</option><option value="date">Daily</option><option value="hour">Hourly</option>
+          </select></div>
+        <span style={{fontSize:11,color:'#a0b4c0',marginLeft:'auto'}}>{displayRows.length} pts</span>
+      </div>
+      <canvas ref={cvRef} width={680} height={230} style={{maxWidth:'100%',borderRadius:6,background:'#fff',display:'block'}}/>
+    </div>
+  );
+}
+
+// ─── PARSERS ────────────────────────────────────────────────────────────────
+// Utility: parse SQL*Plus fixed-width output using the dash-separator line
+function parseSQLPlusFixedWidth(text){
+  if(!text)return null;
+  const lines=text.split('\n');
+  // Find the separator line (line of dashes and spaces, no other chars)
+  const sepIdx=lines.findIndex(l=>/^[\-\s]+$/.test(l)&&l.includes('---'));
+  if(sepIdx===-1)return null;
+  const sepLine=lines[sepIdx];
+  // Extract column ranges from dash runs
+  const ranges=[];let i=0;
+  while(i<sepLine.length){
+    if(sepLine[i]==='-'){const start=i;while(i<sepLine.length&&sepLine[i]==='-')i++;ranges.push([start,i])}
+    else i++;
+  }
+  if(!ranges.length)return null;
+  // Header is the line just before separator
+  const headerLine=lines[sepIdx-1]||'';
+  const headers=ranges.map(([s,e])=>(headerLine.slice(s,e)||'').trim());
+  // Data rows are after separator
+  const dataRows=[];
+  for(let j=sepIdx+1;j<lines.length;j++){
+    const line=lines[j];
+    if(!line.trim())continue;
+    if(/^[\-\s]+$/.test(line)&&line.includes('---'))break;// next query block
+    if(/rows? selected/i.test(line))continue;
+    if(/^SQL>/i.test(line.trim()))break;
+    const row=ranges.map(([s,e])=>(line.slice(s,e)||'').trim());
+    if(row.some(c=>c))dataRows.push(row);
+  }
+  return{headers,rows:dataRows,ranges};
+}
+
+function parseMountpoint(text){
+  if(!text)return{rows:[]};
+  const RE=/^(\S+)\s+(\S+)\s+(\S+)\s+(\S+)\s+(\d+)%\s+(.+)$/;
+  const rows=[];
+  for(const line of text.split('\n')){
+    const m=line.match(RE);if(!m)continue;
+    const pct=parseInt(m[5]);
+    rows.push({filesystem:m[1],size:m[2],used:m[3],avail:m[4],pct,mountOn:m[6].trim(),flagged:pct>85});
+  }
+  return{rows};
+}
+
+function parseTablespace(text){
+  if(!text)return{rows:[]};
+  const p=parseSQLPlusFixedWidth(text);
+  if(!p||!p.rows.length)return{rows:[]};
+  const rows=p.rows.map(r=>({
+    tablespaceName:r[0],aut:r[1],
+    maxTsSize:parseFloat(r[2])||0,maxTsPctUsed:parseFloat(r[3])||0,
+    currTsSize:parseFloat(r[4])||0,usedTsSize:parseFloat(r[5])||0,
+    tsPctUsed:parseFloat(r[6])||0,freeTsSize:parseFloat(r[7])||0,tsPctFree:parseFloat(r[8])||0,
+    flagged:(parseFloat(r[6])||0)>85,
+  })).filter(r=>r.tablespaceName);
+  return{rows};
+}
+
+function parseRman(text){
+  if(!text)return{rows:[]};
+  const p=parseSQLPlusFixedWidth(text);
+  if(!p||!p.rows.length)return{rows:[]};
+  const rows=p.rows.map(r=>({
+    inputType:r[0],status:r[1],startTime:r[2],timeTaken:r[3],
+    inputSizeGb:parseFloat(r[4])||0,outputSizeGb:parseFloat(r[5])||0,deviceType:r[6]||'',
+    flagged:(r[1]||'').toUpperCase().includes('FAILED'),
+  })).filter(r=>r.inputType);
+  return{rows};
+}
+
+function parseCpuUtils(text){
+  if(!text)return{columns:[],rows:[]};
+  const p=parseSQLPlusFixedWidth(text);
+  if(!p||!p.rows.length)return{columns:[],rows:[]};
+  const seen=new Set();const rows=[];
+  for(const row of p.rows){
+    const key=`${row[0]}-${row[3]}`;
+    if(seen.has(key))continue;seen.add(key);rows.push(row);
+  }
+  return{columns:p.headers,rows};
+}
+
+function parseSessionCount(text){
+  if(!text)return{rows:[]};
+  const p=parseSQLPlusFixedWidth(text);
+  if(!p||!p.rows.length)return{rows:[]};
+  const seen=new Set();const rows=[];
+  for(const row of p.rows){
+    const key=`${row[0]}-${row[3]}-${row[4]}`;
+    if(seen.has(key))continue;seen.add(key);
+    const current=parseFloat(row[5])||0;const max=parseFloat(row[6])||0;
+    const ratio=max>0?current/max:0;
+    rows.push({snapId:row[0],beginTime:row[1],endTime:row[2],instanceNum:row[3],
+      resourceName:row[4],current,max,ratio,flagged:ratio>0.9});
+  }
+  return{rows};
+}
+
+function parseRedolog(text){
+  if(!text)return{rows:[]};
+  // Pre-process: join wrapped lines (single number on its own line = h23 wrapping)
+  const rawLines=text.split('\n');
+  const mergedLines=[];
+  for(const line of rawLines){
+    if(/^\s+\d+\s*$/.test(line)&&mergedLines.length>0)mergedLines[mergedLines.length-1]+=' '+line.trim();
+    else mergedLines.push(line);
+  }
+  const p=parseSQLPlusFixedWidth(mergedLines.join('\n'));
+  if(!p||!p.rows.length)return{rows:[]};
+  const rows=p.rows.map(r=>({
+    thread:r[0],date:r[1],day:r[2],total:parseInt(r[3])||0,
+    hours:r.slice(4).map(v=>parseInt(v)||0),
+  })).filter(r=>r.thread);
+  return{rows};
+}
+
+function parseStatus(text){
+  if(!text)return{};
+  const dbRole=(/PHYSICAL STANDBY|LOGICAL STANDBY/i.exec(text)||[])[0]
+    ||(text.match(/\bPRIMARY\b/)?'PRIMARY':null)||'UNKNOWN';
+  const openMode=(/READ ONLY WITH APPLY|READ WRITE|MOUNTED|READ ONLY/i.exec(text)||[])[0]||'UNKNOWN';
+  const protectionMode=(/MAXIMUM PERFORMANCE|MAXIMUM AVAILABILITY|MAXIMUM PROTECTION/i.exec(text)||[])[0]||'UNKNOWN';
+  const switchoverStatus=(/NOT ALLOWED|SESSIONS ACTIVE|TO PRIMARY|TO STANDBY/i.exec(text)||[])[0]||'UNKNOWN';
+  let mrpStatus=null;
+  const mrpLine=text.split('\n').find(l=>l.includes('MRP0'));
+  if(mrpLine){const mm=(/APPLYING_LOG|WAIT_FOR_LOG|RECEIVING/i.exec(mrpLine)||[]);if(mm[0])mrpStatus=mm[0]}
+  let dbName='';
+  const nameLines=text.split('\n').filter(l=>/^[A-Z]{2,12}\s+/.test(l.trim()));
+  if(nameLines.length>0)dbName=nameLines[0].trim().split(/\s+/)[0];
+  return{dbName,dbRole,openMode,protectionMode,switchoverStatus,mrpStatus,
+    isStandby:dbRole.includes('STANDBY'),isMrpHealthy:mrpStatus==='APPLYING_LOG'};
+}
+
+function parseHostnamectl(text){
+  if(!text)return{};
+  const result={};
+  for(const line of text.split('\n')){
+    const m=line.match(/^\s*([\w\s()]+?):\s*(.+)$/);
+    if(m)result[m[1].trim().toLowerCase().replace(/\s+/g,'_')]=m[2].trim();
+  }
+  return{hostname:result['static_hostname']||result['hostname']||'',
+    osName:result['operating_system']||'',kernelVersion:result['kernel']||'',
+    architecture:result['architecture']||'',virtualization:result['virtualization']||''};
+}
+
+function parseCpuCount(text){
+  if(!text)return{};
+  const result={};
+  for(const line of text.split('\n')){const m=line.match(/^([^:]+):\s*(.+)$/);if(m)result[m[1].trim()]=m[2].trim()}
+  return{cpuCount:parseInt(result['CPU(s)'])||0,cpuModel:result['Model name']||'',
+    threadsPerCore:parseInt(result['Thread(s) per core'])||1,
+    coresPerSocket:parseInt(result['Core(s) per socket'])||1,sockets:parseInt(result['Socket(s)'])||1};
+}
+
+function parseMemory(text){
+  if(!text)return{totalGb:0,usedGb:0,freeGb:0};
+  const lines=text.split('\n').filter(l=>l.trim());
+  const memLine=lines.find(l=>l.startsWith('Mem:'));
+  if(!memLine)return{totalGb:0,usedGb:0,freeGb:0};
+  const parts=memLine.trim().split(/\s+/);
+  const parseH=s=>{if(!s)return 0;const m=s.match(/^([\d.]+)([TtGgMmKk]i?)?/);if(!m)return 0;const n=parseFloat(m[1]);const u=(m[2]||'').toLowerCase();
+    if(u.startsWith('t'))return n*1024;if(u.startsWith('g'))return n;if(u.startsWith('m'))return n/1024;if(u.startsWith('k'))return n/1024/1024;return n};
+  return{totalGb:parseH(parts[1]),usedGb:parseH(parts[2]),freeGb:parseH(parts[3])};
+}
+
+function parseAsm(text){
+  if(!text)return{groups:[]};
+  const p=parseSQLPlusFixedWidth(text);
+  if(!p||!p.rows.length)return{groups:[]};
+  const groups=p.rows.map(r=>{
+    const name=r[0];const state=r[1]||'';
+    const totalGb=parseFloat((r[2]||'').replace(/,/g,''))||0;
+    const freeGb=parseFloat((r[3]||'').replace(/,/g,''))||0;
+    const pctFree=totalGb>0?parseFloat((freeGb/totalGb*100).toFixed(1)):0;
+    return{name,state,totalGb,freeGb,pctFree,flagged:pctFree<15};
+  }).filter(g=>g.name);
+  return{groups};
+}
+
+function parseAllFiles(files){
+  return{
+    mountpoint:parseMountpoint(files['total_mountpoint']||files['mountpoint']||''),
+    tablespace:parseTablespace(files['size_tablespace']||''),
+    rman:parseRman(files['2_rman']||''),
+    cpuUtils:parseCpuUtils(files['cpu_utils']||''),
+    sessions:parseSessionCount(files['session_count']||''),
+    redolog:parseRedolog(files['redolog_switch']||''),
+    status:parseStatus(files['1_status']||''),
+    hostname:parseHostnamectl(files['hostnamectl']||''),
+    cpuInfo:parseCpuCount(files['cpu-count-linux']||''),
+    memory:parseMemory(files['memtotal-linux-mb']||files['memtotal-linux']||''),
+    asm:parseAsm(files['asm_usage']||files['9_check_ASM']||''),
+  };
+}
+
+// ─── THRESHOLD ANALYSIS ─────────────────────────────────────────────────────
+function analyzeDatabase(parsed){
+  const flags=[];
+
+  // Mount points > 85%
+  for(const row of parsed.mountpoint?.rows||[]){
+    if(row.pct>85)flags.push({section:'Mount Point Usage',severity:row.pct>95?'critical':'warning',
+      item:row.mountOn,metric:'Use%',value:row.pct,threshold:85,
+      message:`${row.mountOn} is ${row.pct}% full`});
+  }
+
+  // Tablespace > 85%
+  for(const row of parsed.tablespace?.rows||[]){
+    if(row.tsPctUsed>85)flags.push({section:'Tablespace Status',severity:row.tsPctUsed>95?'critical':'warning',
+      item:row.tablespaceName,metric:'TS_PCT_USED',value:row.tsPctUsed,threshold:85,
+      message:`${row.tablespaceName} is ${row.tsPctUsed.toFixed(1)}% used`});
+  }
+
+  // RMAN FAILED
+  for(const row of parsed.rman?.rows||[]){
+    if(row.flagged)flags.push({section:'RMAN Backup Status',severity:'critical',
+      item:`${row.inputType} @ ${row.startTime}`,metric:'STATUS',value:row.status,threshold:'No FAILED',
+      message:`Backup FAILED: ${row.inputType} started ${row.startTime}`});
+  }
+
+  // Sessions > 90%
+  const instPeak={};
+  for(const row of parsed.sessions?.rows||[]){
+    const k=row.instanceNum;
+    if(!instPeak[k]||row.ratio>instPeak[k].ratio)instPeak[k]={ratio:row.ratio,row};
+  }
+  for(const{ratio,row}of Object.values(instPeak)){
+    if(ratio>0.90)flags.push({section:'Current Sessions',severity:ratio>0.95?'critical':'warning',
+      item:`Instance ${row.instanceNum}`,metric:'Session Utilization',
+      value:(ratio*100).toFixed(1)+'%',threshold:'90%',
+      message:`Instance ${row.instanceNum}: ${row.current?.toFixed(0)} / ${row.max?.toFixed(0)} sessions (${(ratio*100).toFixed(1)}%)`});
+  }
+
+  // ASM free < 15%
+  for(const g of parsed.asm?.groups||[]){
+    if(g.pctFree<15)flags.push({section:'ASM Disk Groups',severity:g.pctFree<5?'critical':'warning',
+      item:g.name,metric:'% Free',value:g.pctFree,threshold:15,
+      message:`ASM group ${g.name} only ${g.pctFree}% free`});
+  }
+
+  return flags;
+}
+
+// ─── SECTION AUTO-FILL ───────────────────────────────────────────────────────
+function buildSectionsFromParsed(parsed,flags){
+  const secs={};
+  SECTION_DEFS.forEach(sd=>{secs[sd.id]={tableColumns:[],tableRows:[],recommendation:sd.defaultRec}});
+
+  // CPU Utilization — chart only (no table), track chartImage/inputMode per-section
+  secs.cpu.tableColumns=[];
+  secs.cpu.tableRows=[];
+  secs.cpu.chartImage=null;
+  secs.cpu.inputMode=parsed.cpuUtils?.rows?.length?'chart':'image';
+
+  // Mount Point Usage
+  if(parsed.mountpoint?.rows?.length){
+    secs.mountpoint.tableColumns=['Filesystem','Size','Used','Available','Use%','Mounted On'];
+    secs.mountpoint.tableRows=parsed.mountpoint.rows.map(r=>[r.filesystem,r.size,r.used,r.avail,r.pct+'%',r.mountOn]);
+  }
+
+  // Tablespace Status
+  if(parsed.tablespace?.rows?.length){
+    secs.tablespace.tableColumns=['Tablespace','Curr Size (MB)','Used (MB)','Used %','Free (MB)','Auto Ext'];
+    secs.tablespace.tableRows=parsed.tablespace.rows.map(r=>[r.tablespaceName,r.currTsSize?.toFixed(0),r.usedTsSize?.toFixed(0),r.tsPctUsed?.toFixed(2)+'%',r.freeTsSize?.toFixed(0),r.aut]);
+  }
+
+  // Current Sessions (aggregate peak per instance)
+  if(parsed.sessions?.rows?.length){
+    const instPeak={};
+    parsed.sessions.rows.forEach(r=>{const k=r.instanceNum;if(!instPeak[k]||r.current>instPeak[k].current)instPeak[k]=r});
+    secs.sessions.tableColumns=['Instance','Peak Current','Max Allowed','Used %'];
+    secs.sessions.tableRows=Object.values(instPeak).map(r=>['Instance '+r.instanceNum,r.current?.toFixed(0),r.max?.toFixed(0),(r.ratio*100).toFixed(1)+'%']);
+  }
+
+  // RMAN Backup Status
+  if(parsed.rman?.rows?.length){
+    secs.rman.tableColumns=['Type','Status','Start Time','Duration','Input (GB)','Output (GB)','Device'];
+    secs.rman.tableRows=parsed.rman.rows.map(r=>[r.inputType,r.status,r.startTime,r.timeTaken,r.inputSizeGb?.toFixed(1),r.outputSizeGb?.toFixed(1),r.deviceType]);
+  }
+
+  // Redo Transaction
+  if(parsed.redolog?.rows?.length){
+    secs.redo.tableColumns=['Thread','Date','Day','Total Switches'];
+    secs.redo.tableRows=parsed.redolog.rows.map(r=>[r.thread,r.date,r.day,String(r.total)]);
+  }
+
+  // Dataguard Review
+  if(parsed.status?.dbRole){
+    const s=parsed.status;
+    secs.dataguard.tableColumns=['Property','Value'];
+    secs.dataguard.tableRows=[
+      ['Database Role',s.dbRole||''],['Open Mode',s.openMode||''],
+      ['Protection Mode',s.protectionMode||''],['Switchover Status',s.switchoverStatus||''],
+      ['MRP0 Status',s.mrpStatus||'N/A (Primary)'],
+    ];
+  }
+
+  return secs;
+}
+
+// renderCpuChartToImage removed — CPU chart now rendered server-side via matplotlib
+// ─── PLACEHOLDER (kept for reference) ────────────────────────────────────────
+async function renderCpuChartToImage(cpuData){
+  if(!cpuData||!cpuData.rows||!cpuData.rows.length)return null;
+  const canvas=document.createElement('canvas');
+  canvas.width=800;canvas.height=400;
+  const ctx=canvas.getContext('2d');
+  const cols=cpuData.columns;const rows=cpuData.rows;
+  const gi=pat=>cols.findIndex(c=>new RegExp(pat,'i').test(c));
+  const lIdx=gi('begin')!==-1?gi('begin'):gi('snap')!==-1?gi('snap'):0;
+  const mIdx=gi('max');const aIdx=gi('avg');const instIdx=gi('instance');
+  const toN=v=>{const n=parseFloat(v);return isNaN(n)?null:n};
+  const instances=[...new Set(rows.map(r=>r[instIdx]).filter(Boolean))];
+  const COLORS=['#d44','#1b9aaa','#f59e0b','#8b5cf6'];
+  const datasets=instances.length>1
+    ?instances.map((inst,i)=>{const ir=rows.filter(r=>r[instIdx]===inst);return{label:`Inst ${inst} Max%`,data:ir.map(r=>toN(r[mIdx])),borderColor:COLORS[i%COLORS.length],tension:0.3,fill:false,pointRadius:2,borderWidth:2}})
+    :[{label:'Max CPU%',data:rows.map(r=>toN(r[mIdx])),borderColor:'#d44',backgroundColor:'rgba(212,68,68,0.08)',tension:0.3,fill:true,pointRadius:2,borderWidth:2},
+      {label:'Avg CPU%',data:rows.map(r=>toN(r[aIdx])),borderColor:'#1b9aaa',backgroundColor:'rgba(27,154,170,0.08)',tension:0.3,fill:true,pointRadius:2,borderWidth:2}];
+  const chart=new Chart(ctx,{type:'line',data:{labels:rows.map(r=>(r[lIdx]||'').slice(0,16)),datasets},options:{animation:false,responsive:false,plugins:{legend:{position:'top'}},scales:{y:{min:0,max:100,title:{display:true,text:'CPU %'},grid:{color:'#e8f1f5'}},x:{ticks:{maxRotation:45,font:{size:9}},grid:{color:'#e8f1f5'}}}}});
+  return new Promise(resolve=>{
+    requestAnimationFrame(()=>{canvas.toBlob(blob=>{
+      if(!blob){chart.destroy();resolve(null);return}
+      const reader=new FileReader();
+      reader.onload=e=>{chart.destroy();resolve(new Uint8Array(e.target.result))};
+      reader.onerror=()=>{chart.destroy();resolve(null)};
+      reader.readAsArrayBuffer(blob);
+    },'image/png')});
+  });
+}
+
+// ─── buildHeaderTable + generateDocx removed — DOCX now built by server-side docx_builder.py ───
+// ─── Use /generate endpoint instead ─────────────────────────────────────────
+function buildHeaderTable(t,data,coverDbName,logoData,clientLogoData){
+  const W=[1828,1261,866,900,2446,1819];
+  const hb={style:BorderStyle.SINGLE,size:1,color:"AAAAAA"};
+  const hBorders={top:hb,bottom:hb,left:hb,right:hb};
+  const hM={top:40,bottom:40,left:60,right:60};
+  const hC=(text,w,o={})=>new TableCell({width:{size:w,type:WidthType.DXA},borders:hBorders,margins:hM,
+    rowSpan:o.rs,columnSpan:o.cs,verticalAlign:VerticalAlign.CENTER,
+    children:[new Paragraph({alignment:AlignmentType.CENTER,children:[new TextRun({text:text||'',font:"Calibri",size:16,bold:o.bold||false})]})]});
+  const clientCellChildren=clientLogoData
+    ?[new Paragraph({alignment:AlignmentType.CENTER,children:[new ImageRun({data:clientLogoData.data,transformation:{width:80,height:40},type:clientLogoData.type})]}),
+      new Paragraph({alignment:AlignmentType.CENTER,children:[new TextRun({text:t.clientName||'',font:"Calibri",size:16,bold:true})]})]
+    :[new Paragraph({alignment:AlignmentType.CENTER,children:[new TextRun({text:t.clientName||'',font:"Calibri",size:16,bold:true})]})];
+  const clientCell=new TableCell({width:{size:W[0],type:WidthType.DXA},borders:hBorders,margins:hM,rowSpan:4,verticalAlign:VerticalAlign.CENTER,children:clientCellChildren});
+  const titleCell=new TableCell({width:{size:W[1]+W[2]+W[3]+W[4],type:WidthType.DXA},borders:hBorders,margins:hM,columnSpan:4,verticalAlign:VerticalAlign.CENTER,
+    children:[
+      new Paragraph({alignment:AlignmentType.CENTER,children:[new TextRun({text:t.reportTitle||'Health Check Report',font:"Calibri",size:16,bold:true})]}),
+      new Paragraph({alignment:AlignmentType.CENTER,children:[new TextRun({text:`Oracle Database ${coverDbName}`,font:"Calibri",size:16})]}),
+      new Paragraph({alignment:AlignmentType.CENTER,children:[new TextRun({text:data.period||'',font:"Calibri",size:16})]}),
+    ]});
+  const logoCell=new TableCell({width:{size:W[5],type:WidthType.DXA},borders:hBorders,margins:hM,rowSpan:4,verticalAlign:VerticalAlign.CENTER,
+    children:[new Paragraph({alignment:AlignmentType.CENTER,children:logoData
+      ?[new ImageRun({data:logoData.data,transformation:{width:80,height:40},type:logoData.type})]
+      :[new TextRun({text:'',font:"Calibri",size:16})]})]});
+  const extDocCell=new TableCell({width:{size:W[1]+W[2]+W[3],type:WidthType.DXA},borders:hBorders,margins:hM,columnSpan:3,verticalAlign:VerticalAlign.CENTER,
+    children:[new Paragraph({alignment:AlignmentType.CENTER,children:[new TextRun({text:'External Document',font:"Calibri",size:16})]})]});
+  const pageCell=new TableCell({width:{size:W[4],type:WidthType.DXA},borders:hBorders,margins:hM,verticalAlign:VerticalAlign.CENTER,
+    children:[new Paragraph({alignment:AlignmentType.CENTER,children:[
+      new TextRun({text:'Page ',font:"Calibri",size:16}),
+      new TextRun({children:[PageNumber.CURRENT],font:"Calibri",size:16}),
+      new TextRun({text:' of ',font:"Calibri",size:16}),
+      new TextRun({children:[PageNumber.TOTAL_PAGES],font:"Calibri",size:16}),
+    ]})]});
+  const emptyCell=new TableCell({
+    width:{size:9120,type:WidthType.DXA},
+    borders:{top:{style:BorderStyle.NONE,size:0,color:"FFFFFF"},bottom:{style:BorderStyle.NONE,size:0,color:"FFFFFF"},left:{style:BorderStyle.NONE,size:0,color:"FFFFFF"},right:{style:BorderStyle.NONE,size:0,color:"FFFFFF"}},
+    margins:{top:0,bottom:0,left:0,right:0},
+    columnSpan:6,
+    verticalAlign:VerticalAlign.CENTER,
+    children:[new Paragraph("")]
+  });
+  return new Table({width:{size:9120,type:WidthType.DXA},rows:[
+    new TableRow({children:[clientCell,titleCell,logoCell]}),
+    new TableRow({children:[extDocCell,pageCell]}),
+    new TableRow({children:[hC('Date',W[1]),hC('Version',W[2]),hC('Rev',W[3]),hC('Created by: '+(data.authorName||''),W[4])]}),
+    new TableRow({children:[hC(data.docDate||'',W[1]),hC(data.docVersion||'',W[2]),hC('0',W[3]),hC('PT. SISINDOKOM LINTASBUANA',W[4])]}),
+    new TableRow({children:[emptyCell]})
+  ]});
+}
+
+// ─── DOCX GENERATOR ─────────────────────────────────────────────────────────
+async function generateDocx(t,data,opts={}){
+  const mode=opts.mode||"single";
+  const BLUE="0F4C75";const TEAL="1B9AAA";
+  const DB_COLORS=["0F4C75","067E7B","067e3a","6A1B9A","ff9465","E65100","00695C","37474F"];
+  const border={style:BorderStyle.SINGLE,size:1,color:"CCCCCC"};
+  const borders={top:border,bottom:border,left:border,right:border};
+  const cellM={top:60,bottom:60,left:100,right:100};const cellMC={top:40,bottom:40,left:60,right:60};const TW=9026;
+  const wrapLong=t=>(t||"").split(" ").map(w=>w.length>17?w.replace(/(.{17})/g,"$1\u200B"):w).join(" ");
+  const hdrCell=(text,w,o={})=>new TableCell({width:{size:w,type:WidthType.DXA},borders,margins:o.margins||cellM,shading:{fill:BLUE,type:ShadingType.CLEAR},children:[new Paragraph({children:[new TextRun({text,bold:true,color:"FFFFFF",font:"Cambria",size:o.size||20})]})]});
+  const dataCell=(text,w,o={})=>new TableCell({width:{size:w,type:WidthType.DXA},borders,margins:o.margins||cellM,shading:o.shading?{fill:o.shading,type:ShadingType.CLEAR}:undefined,children:[new Paragraph({children:[new TextRun({text:wrapLong(text||""),font:"Cambria",size:o.size||20,bold:o.bold||false})]})]});
+  const noBorder={style:BorderStyle.NONE,size:0,color:"FFFFFF"};
+  const spacerRow=(cws)=>new TableRow({height:{value:200,rule:"exact"},children:cws.map(w=>new TableCell({width:{size:w,type:WidthType.DXA},borders:{top:noBorder,bottom:noBorder,left:noBorder,right:noBorder},children:[new Paragraph({})]}))});
+  // Screenshot image conversion
+  const imageRuns=[];
+  for(const sec of data.sections){
+    const imgs=[];
+    for(const ss of(sec.screenshots||[])){if(ss&&ss.data){try{const b64=ss.data.split(",")[1];const bin=atob(b64);const bytes=new Uint8Array(bin.length);for(let i=0;i<bin.length;i++)bytes[i]=bin.charCodeAt(i);imgs.push({data:bytes,w:500,h:300,type:ss.data.includes("png")?"png":"jpg"})}catch{imgs.push(null)}}else imgs.push(null)}
+    imageRuns.push({flat:imgs});
+  }
+  // Per-DB image runs for combined mode
+  let dbImageRuns=null;
+  if(mode==='combined'&&opts.dbsData){
+    dbImageRuns=opts.dbsData.map(dbData=>dbData.sections.map(sec=>{
+      const imgs=[];
+      for(const ss of(sec.screenshots||[])){if(ss&&ss.data){try{const b64=ss.data.split(",")[1];const bin=atob(b64);const bytes=new Uint8Array(bin.length);for(let i=0;i<bin.length;i++)bytes[i]=bin.charCodeAt(i);imgs.push({data:bytes,w:500,h:300,type:ss.data.includes("png")?"png":"jpg"})}catch{imgs.push(null)}}else imgs.push(null)}
+      return imgs;
+    }));
+  }
+  // Display names
+  let coverDbName,execDbText,execServerText,sumDbName;
+  if(mode==="single"){coverDbName=t.databaseName||"";execDbText=t.databaseName||"";execServerText=t.serverType||"the server";sumDbName=t.databaseName||""}
+  else if(mode==="separate"){coverDbName=opts.db.databaseName||"";execDbText=opts.db.databaseName||"";execServerText=opts.db.serverType||"the server";sumDbName=opts.db.databaseName||""}
+  else{const dbs=opts.dbs||[];coverDbName=dbs.map(db=>db.databaseName).filter(Boolean).join(", ")||"";execDbText=coverDbName;execServerText=[...new Set(dbs.map(db=>db.serverType).filter(Boolean))].join(", ")||"the server";sumDbName=coverDbName}
+  // Pre-render CPU chart image
+  let cpuChartImgData=null;
+  const cpuSec=data.sections.find(s=>s.id==='cpu');
+  if(cpuSec){
+    if(cpuSec.chartImage){cpuChartImgData=cpuSec.chartImage}
+    else if(opts.cpuParsed?.rows?.length){const b=await renderCpuChartToImage(opts.cpuParsed);if(b)cpuChartImgData={data:b,type:'png'}}
+  }
+  const logoData=opts.logoData||null;
+  const clientLogoData=opts.clientLogoData||null;
+  // Cover page — match template
+  const coverChildren=[
+    ...(logoData?[new Paragraph({alignment:AlignmentType.CENTER,children:[new ImageRun({data:logoData.data,transformation:{width:120,height:60},type:logoData.type})]})]:[]),
+    new Paragraph({spacing:{before:200},alignment:AlignmentType.CENTER,children:[new TextRun({text:"Advance Services Reporting",font:"Cambria",size:36,bold:true})]}),
+    new Paragraph({alignment:AlignmentType.CENTER,children:[new TextRun({text:t.reportTitle||"",font:"Cambria",size:26})]}),
+    new Paragraph({}),new Paragraph({}),new Paragraph({}),new Paragraph({}),new Paragraph({}),new Paragraph({}),new Paragraph({}),new Paragraph({}),new Paragraph({}),new Paragraph({}),new Paragraph({}),
+    new Paragraph({alignment:AlignmentType.CENTER,children:[new TextRun({text:"Report of Healthy Check For",font:"Cambria",size:22})]}),
+    new Paragraph({alignment:AlignmentType.CENTER,children:[new TextRun({text:`Oracle Database ${coverDbName}`,font:"Cambria",size:28,bold:true})]}),
+    new Paragraph({alignment:AlignmentType.CENTER,children:[new TextRun({text:data.period||"",font:"Cambria",size:26,bold:true})]}),
+    new Paragraph({}),new Paragraph({}),new Paragraph({}),new Paragraph({}),new Paragraph({}),new Paragraph({}),new Paragraph({}),new Paragraph({}),new Paragraph({}),new Paragraph({}),new Paragraph({}),
+    new Paragraph({alignment:AlignmentType.CENTER,children:[new TextRun({text:"Prepared for",font:"Cambria",size:22})]}),
+    new Paragraph({alignment:AlignmentType.CENTER,children:[new TextRun({text:t.clientName||"",font:"Cambria",size:28,bold:true})]}),
+    ...(clientLogoData?[new Paragraph({alignment:AlignmentType.CENTER,children:[new ImageRun({data:clientLogoData.data,transformation:{width:80,height:40},type:clientLogoData.type})]})]:[]),
+  ];
+  // Info
+  const infoChildren=[
+    new Paragraph({heading:HeadingLevel.HEADING_1,spacing:{before:240,after:200},children:[new TextRun({text:"1. Information",font:"Cambria",size:28,bold:true,color:"000000"})]}),
+    new Paragraph({heading:HeadingLevel.HEADING_2,spacing:{before:200,after:200},children:[new TextRun({text:"1.1 Document Information",font:"Cambria",size:24,bold:true,color:"000000"})]}),
+    new Table({width:{size:TW,type:WidthType.DXA},columnWidths:[2200,2500,2200,2126],rows:[
+      new TableRow({children:[hdrCell("Title",2200),dataCell(`${t.reportTitle} - ${coverDbName}`,2500),hdrCell("Doc Version",2200),dataCell(data.docVersion,2126)]}),
+      new TableRow({children:[hdrCell("Process Owner",2200),dataCell(t.companyName,2500),hdrCell("Version Date",2200),dataCell(data.docDate,2126)]}),
+      new TableRow({children:[hdrCell("Author",2200),dataCell(data.authorName,2500),hdrCell("Date Created",2200),dataCell(data.docDate,2126)]}),
+    ]}),
+    new Paragraph({heading:HeadingLevel.HEADING_2,spacing:{before:300,after:200},children:[new TextRun({text:"1.2 Reviewers",font:"Cambria",size:24,bold:true,color:"000000"})]}),
+    new Table({width:{size:TW,type:WidthType.DXA},columnWidths:[3009,3009,3008],rows:[
+      new TableRow({children:[hdrCell("Name",3009),hdrCell("Position",3009),hdrCell("Company",3008)]}),
+      ...(t.reviewers||[]).map(r=>new TableRow({children:[dataCell(r.name,3009),dataCell(r.position,3009),dataCell(r.company||t.companyName,3008)]}))
+    ]}),
+  ];
+  // Exec summary
+  const execChildren=[
+    new Paragraph({children:[new PageBreak()]}),
+    new Paragraph({heading:HeadingLevel.HEADING_1,spacing:{before:240,after:200},children:[new TextRun({text:"2. Executive Summary",font:"Cambria",size:28,bold:true,color:"000000"})]}),
+    new Paragraph({spacing:{before:100,after:100},children:[
+      new TextRun({text:"ATS conducted a technical assessment and preventive maintenance at ",font:"Cambria",size:20}),
+      new TextRun({text:t.clientName||"",font:"Cambria",size:20,bold:true}),
+      new TextRun({text:` on the `,font:"Cambria",size:20}),
+      new TextRun({text:execDbText,font:"Cambria",size:20,bold:true}),
+      new TextRun({text:` database hosted on `,font:"Cambria",size:20}),
+      new TextRun({text:execServerText,font:"Cambria",size:20,bold:true}),
+      new TextRun({text:`. This document recommends changes and identifies specific areas that require more detailed investigation.`,font:"Cambria",size:20}),
+    ]}),
+    new Paragraph({spacing:{after:200},children:[new TextRun({text:`Performance data was collected on ${data.dataCollectionDate}.`,font:"Cambria",size:20})]}),
+  ];
+  const issues=data.executiveSummaryIssues.filter(i=>i.section);
+  if(issues.length){const cw=[1200,2100,2100,900,700,2026];execChildren.push(new Table({width:{size:TW,type:WidthType.DXA},columnWidths:cw,rows:[
+    new TableRow({children:["Section","Problem","Recommendation","Risk","Impact","Comment"].map((h,i)=>hdrCell(h,cw[i]))}),
+    ...issues.map(iss=>new TableRow({children:[dataCell(iss.section,cw[0]),dataCell(iss.problem,cw[1]),dataCell(iss.recommendation,cw[2]),dataCell(iss.risk||"-",cw[3]),dataCell(iss.impact,cw[4]),dataCell(iss.comment||"-",cw[5])]}))
+  ]}))}
+  // System overview
+  const si=opts.serverInfo||{};const di=opts.databaseInfo||{};
+  const sysRow=(label,value)=>new TableRow({children:[hdrCell(label,2500),dataCell(value||"-",6526)]});
+  const buildExtSysRows=(client,dbName,serverType)=>{
+    const rows=[sysRow("Client",client),sysRow("Database",dbName)];
+    if(di.instanceName)rows.push(sysRow("Instance",di.instanceName));
+    if(di.instanceVersion)rows.push(sysRow("Oracle Version",di.instanceVersion));
+    if(si.hostname)rows.push(sysRow("Hostname",si.hostname+(si.ip?" ("+si.ip+")":"")));
+    if(si.os)rows.push(sysRow("Operating System",si.os));
+    if(si.kernel)rows.push(sysRow("Kernel",si.kernel));
+    if(si.cpus||si.systemModel)rows.push(sysRow("CPU",[si.cpus,si.systemModel].filter(Boolean).join(" — ")));
+    if(si.totalMemory)rows.push(sysRow("Total Memory",si.totalMemory));
+    if(di.openMode)rows.push(sysRow("Open Mode",di.openMode));
+    if(di.archiveMode)rows.push(sysRow("Archive Mode",di.archiveMode));
+    if(di.characterSet)rows.push(sysRow("Character Set",di.characterSet));
+    if(!si.hostname&&serverType)rows.push(sysRow("Server / OS",serverType||"-"));
+    return rows;
+  };
+  let sysRows;
+  if(mode==="single")sysRows=buildExtSysRows(t.clientName,t.databaseName,t.serverType);
+  else if(mode==="separate")sysRows=buildExtSysRows(t.clientName,opts.db.databaseName,opts.db.serverType);
+  else{const dbs=opts.dbs||[];sysRows=[sysRow("Client",t.clientName), ...dbs.map((db,i)=>sysRow(i===0?"Database":`Database ${i+1}`,`${db.databaseName||"-"} (${db.serverType||"-"})`))];}
+  const sysChildren=[new Paragraph({children:[new PageBreak()]}),new Paragraph({heading:HeadingLevel.HEADING_1,spacing:{before:240,after:200},children:[new TextRun({text:"3. System Overview",font:"Cambria",size:28,bold:true,color:"000000"})]}),new Table({width:{size:TW,type:WidthType.DXA},columnWidths:[2500,6526],rows:sysRows})];
+  // Findings
+  const findChildren=[new Paragraph({heading:HeadingLevel.HEADING_1,spacing:{before:400,after:200},children:[new TextRun({text:"4. Findings",font:"Cambria",size:28,bold:true,color:"000000"})]})];
+  // Helper: push table + images + recommendation for one DB's section
+  const pushSecContent=(sec,secImgsFlat,recommendation,captionDbName,cpuImg,extraOpts={})=>{
+    const ct=sec.contentType||(sec.id==='cpu'?'image':'table');
+    if((ct==='table'||ct==='table+image')&&sec.tableColumns&&sec.tableColumns.length){
+      const dRows=sec.tableRows||[];
+      if(dRows.length){const cols=sec.tableColumns;const minW=800;const totalMin=minW*cols.length;const useAuto=totalMin>TW;const colW=useAuto?minW:Math.floor(TW/cols.length);const lastW=useAuto?minW:(TW-colW*(cols.length-1));const cws=cols.map((_,i)=>i===cols.length-1?lastW:colW);const co={size:18,margins:cellMC};
+        const hdrColor=extraOpts.dbColor||BLUE;
+        const dbHdrCell=(text,w,o={})=>new TableCell({width:{size:w,type:WidthType.DXA},borders,margins:o.margins||cellM,shading:{fill:hdrColor,type:ShadingType.CLEAR},children:[new Paragraph({children:[new TextRun({text,bold:true,color:"FFFFFF",font:"Cambria",size:o.size||20})]})]});
+        const totalW=cws.reduce((a,b)=>a+b,0);
+        const firstRow=extraOpts.inlineTitleRow
+          ?new TableRow({children:[new TableCell({width:{size:totalW,type:WidthType.DXA},columnSpan:cols.length,borders,margins:cellM,shading:{fill:hdrColor,type:ShadingType.CLEAR},children:[new Paragraph({alignment:AlignmentType.CENTER,children:[new TextRun({text:captionDbName,bold:true,color:"FFFFFF",font:"Cambria",size:22})]})]})]})
+          :spacerRow(cws);
+        findChildren.push(new Table({width:useAuto?{size:0,type:WidthType.AUTO}:{size:TW,type:WidthType.DXA},columnWidths:cws,rows:[firstRow,new TableRow({children:cols.map((c,i)=>dbHdrCell(c,cws[i],co))}), ...dRows.map(row=>new TableRow({children:row.map((cell,i)=>dataCell(String(cell||""),cws[i],co))}))]}))}
+    }
+    if(ct==='image'||ct==='table+image'){
+      if(sec.id==='cpu'){
+        if(cpuImg){findChildren.push(new Paragraph({spacing:{before:100,after:100},alignment:AlignmentType.CENTER,children:[new ImageRun({data:cpuImg.data,transformation:{width:450,height:225},type:cpuImg.type})]}))}
+        else{findChildren.push(new Paragraph({spacing:{before:100,after:100},children:[new TextRun({text:"[CPU utilization chart not available]",font:"Cambria",size:20,color:"999999"})]}))}
+      }else{
+        secImgsFlat.forEach(img=>{if(img)findChildren.push(new Paragraph({spacing:{before:100,after:100},alignment:AlignmentType.CENTER,children:[new ImageRun({data:img.data,transformation:{width:img.w,height:img.h},type:img.type})]}))});
+      }
+    }else if(ct!=='none'){
+      secImgsFlat.forEach(img=>{if(img)findChildren.push(new Paragraph({spacing:{before:100,after:100},alignment:AlignmentType.CENTER,children:[new ImageRun({data:img.data,transformation:{width:img.w,height:img.h},type:img.type})]}))});
+    }
+    findChildren.push(new Paragraph({spacing:{before:100},children:[new TextRun({text:"Recommendation:",font:"Cambria",size:20,bold:true})]}));
+    findChildren.push(new Paragraph({spacing:{after:100},children:[new TextRun({text:recommendation||"",font:"Cambria",size:20})]}));
+  };
+  if(mode==='combined'&&opts.dbsData){
+    // Combined mode: one H2 per section, then H3 + content per database
+    const dbsData=opts.dbsData;const dbs=opts.dbs||[];
+    data.sections.forEach((sec,idx)=>{
+      findChildren.push(new Paragraph({heading:HeadingLevel.HEADING_2,spacing:{before:300,after:200},children:[new TextRun({text:`4.${idx+1} ${sec.name}`,font:"Cambria",size:24,bold:true,color:"000000"})]}));
+      dbsData.forEach((dbData,dbIdx)=>{
+        const dbSec=dbData.sections[idx]||sec;
+        const dbName=dbs[dbIdx]?.databaseName||`Database ${dbIdx+1}`;
+        const secImgsFlat=(dbImageRuns&&dbImageRuns[dbIdx]&&dbImageRuns[dbIdx][idx])||[];
+        const cpuImg=dbIdx===0?cpuChartImgData:(dbSec.chartImage||null);
+        pushSecContent(dbSec,secImgsFlat,dbSec.recommendation,dbName,cpuImg,{inlineTitleRow:true,dbColor:DB_COLORS[dbIdx%DB_COLORS.length]});
+      });
+    });
+  }else{
+    // Single / separate mode: one section per DB, no sub-heading needed
+    data.sections.forEach((sec,idx)=>{
+      findChildren.push(new Paragraph({heading:HeadingLevel.HEADING_2,spacing:{before:300,after:200},children:[new TextRun({text:`4.${idx+1} ${sec.name}`,font:"Cambria",size:24,bold:true,color:"000000"})]}));
+      pushSecContent(sec,(imageRuns[idx]&&imageRuns[idx].flat)||[],sec.recommendation,coverDbName,cpuChartImgData);
+    });
+  }
+  // Summary + Acceptance
+  const sumChildren=[new Paragraph({children:[new PageBreak()]}),new Paragraph({heading:HeadingLevel.HEADING_1,spacing:{before:240,after:200},children:[new TextRun({text:"5. Summary & Recommendation",font:"Cambria",size:28,bold:true,color:"000000"})]}),
+    new Paragraph({spacing:{before:100},children:[new TextRun({text:`From the general checking of the database, the `,font:"Cambria",size:20}),new TextRun({text:sumDbName,font:"Cambria",size:20,bold:true}),new TextRun({text:` database is in `,font:"Cambria",size:20}),new TextRun({text:data.overallCondition,font:"Cambria",size:20,bold:true}),new TextRun({text:` and has acceptable performance.`,font:"Cambria",size:20})]})];
+  if(data.summaryText)sumChildren.push(new Paragraph({spacing:{before:100},children:[new TextRun({text:data.summaryText,font:"Cambria",size:20})]}));
+  const accChildren=[new Paragraph({heading:HeadingLevel.HEADING_1,spacing:{before:400,after:200},children:[new TextRun({text:"6. Acceptance",font:"Cambria",size:28,bold:true,color:"000000"})]}),
+    new Paragraph({spacing:{before:100,after:200},children:[new TextRun({text:"I have read, understand and agree to the contents of this document and am authorized to act on behalf of the company.",font:"Cambria",size:20})]}),
+    new Table({width:{size:TW,type:WidthType.DXA},columnWidths:[4513,4513],rows:[
+      new TableRow({children:[hdrCell(t.clientName||"Client",4513),hdrCell(t.companyName||"Company",4513)]}),
+      new TableRow({height:{value:2000,rule:"atLeast"},children:[dataCell(`Authorized Representative:\n\n\nSignature:\n\nDate:`,4513),dataCell(`DBA:\n${data.authorName}\n\nSignature:\n\nDate: ${data.docDate}`,4513)]})
+    ]})];
+  // Table of Contents page
+  const tocChildren=[
+    new Paragraph({heading:HeadingLevel.HEADING_1,spacing:{before:240,after:300},children:[new TextRun({text:"Table of Contents",font:"Cambria",size:28,bold:true,color:"000000"})]}),
+    new TableOfContents("TOC",{hyperlink:true,headingStyleRange:"1-2"}),
+    new Paragraph({children:[new PageBreak()]}),
+  ];
+  const doc=new Document({
+    styles:{
+      default:{document:{run:{font:"Cambria",size:20}}},
+      paragraphStyles:[
+        {id:"Normal",name:"Normal",basedOn:"Normal",run:{font:"Cambria",size:20},paragraph:{spacing:{line:276,lineRule:"auto"}}},
+        {id:"Heading1",name:"Heading 1",basedOn:"Normal",next:"Normal",quickFormat:true,run:{size:28,bold:true,font:"Cambria",color:"000000"},paragraph:{spacing:{before:240,after:200,line:276,lineRule:"auto"},outlineLevel:0}},
+        {id:"Heading2",name:"Heading 2",basedOn:"Normal",next:"Normal",quickFormat:true,run:{size:24,bold:true,font:"Cambria",color:"000000"},paragraph:{spacing:{before:180,after:200,line:276,lineRule:"auto"},outlineLevel:1}},
+        {id:"Heading3",name:"Heading 3",basedOn:"Normal",next:"Normal",quickFormat:true,run:{size:22,bold:true,font:"Cambria",color:"444444"},paragraph:{spacing:{before:160,after:160,line:276,lineRule:"auto"},outlineLevel:2}},
+      ]
+    },
+    sections:[
+      {
+        properties:{titlePage:true,page:{size:{width:11906,height:16838},margin:{top:1440,right:1440,bottom:1440,left:1440},
+          borders:{pageBorderTop:{style:BorderStyle.SINGLE,size:4,color:"auto",space:24},pageBorderBottom:{style:BorderStyle.SINGLE,size:4,color:"auto",space:24},pageBorderLeft:{style:BorderStyle.SINGLE,size:4,color:"auto",space:24},pageBorderRight:{style:BorderStyle.SINGLE,size:4,color:"auto",space:24}}}},
+        headers:{first:new Header({children:[new Paragraph({children:[new TextRun("")]})]})},
+        children:[...coverChildren]
+      },
+      {
+        properties:{page:{size:{width:11906,height:16838},margin:{top:2400,header:720,right:1440,bottom:1440,left:1440}}},
+        headers:{default:new Header({children:[buildHeaderTable(t,data,coverDbName,logoData,clientLogoData)]})},
+        children:[...tocChildren,...infoChildren,...execChildren,...sysChildren,...findChildren,...sumChildren,...accChildren]
+      }
+    ]
+  });
+  const filename=mode==="separate"
+    ?`Report_${t.clientName||"client"}_${opts.db.databaseName||"db"}_${data.period.replace(/\s/g,"_")}.docx`
+    :`Report_${t.clientName||"client"}_${data.period.replace(/\s/g,"_")}.docx`;
+  const blob=await Packer.toBlob(doc);
+  saveAs(blob,filename);
+}
+
+// ─── LOAD FROM SNAPSHOT JSON ─────────────────────────────────────────────────
+function loadSnapshotJson(jsonData){
+  const m=jsonData.meta||{};
+  const di=jsonData.databaseInfo||{};
+  const si=jsonData.serverInfo||{};
+  const cpuUtils=jsonData.cpuUtils||{columns:[],rows:[]};
+  const secs={};
+  SECTION_DEFS.forEach(sd=>{
+    const j=jsonData.sections?.[sd.id];
+    secs[sd.id]={tableColumns:j?.tableColumns||[],tableRows:j?.tableRows||[],
+      recommendation:getSmartRec(sd.id,j,flagsList,cpuUtils),chartImage:null,screenshots:[],
+      inputMode:sd.id==='cpu'?(cpuUtils.rows?.length?'chart':'image'):null};
+  });
+  const flagsList=jsonData.flags||[];
+  return{
+    folderName:jsonData.folderName||di.instanceName||m.instance||'Snapshot',
+    files:{},
+    parsed:{
+      status:{dbName:di.databaseName||m.database||'',dbRole:m.dbRole||'',
+        openMode:di.openMode||m.openMode||'',protectionMode:'',
+        isStandby:(m.dbRole||'').includes('STANDBY'),isMrpHealthy:false},
+      hostname:{hostname:si.hostname||m.host||'',osName:si.os||''},
+      cpuUtils,
+      cpuInfo:{cpuCount:parseInt(si.cpus)||0,cpuModel:si.systemModel||''},
+      memory:{totalGb:si.totalMemory?parseFloat(si.totalMemory):0},
+      tablespace:{rows:[]},mountpoint:{rows:[]},rman:{rows:[]},
+      sessions:{rows:[]},asm:{groups:[]},
+      serverInfo:si,
+      databaseInfo:di,
+    },
+    flags:flagsList,
+    sections:secs,
+    exaSummaryIssues:flagsList.map(flag=>({section:flag.section,problem:flag.message,recommendation:'',risk:'Medium',impact:flag.severity==='critical'?'High':'Medium',comment:''})),
+  };
+}
+
+// Build report data object from db state
+function buildReportData(db,meta){
+  const execIssues=(db.exaSummaryIssues||[]).filter(i=>i.section||i.problem);
+  return{
+    period:meta.period,dataCollectionDate:meta.dataCollectionDate,
+    docVersion:meta.docVersion,docDate:meta.docDate,authorName:meta.authorName,
+    overallCondition:meta.overallCondition,summaryText:meta.summaryText||'',
+    executiveSummaryIssues:execIssues.length>0?execIssues:[{section:'',problem:'',recommendation:'',risk:'',impact:'Low',comment:''}],
+    sections:(meta.sectionsConfig||defaultSectionsConfig).filter(sc=>sc.enabled).map(sc=>{
+      const sec=db.sections[sc.id]||{};
+      return{id:sc.id,name:sc.name,contentType:sc.contentType||'table',
+        recommendation:sec.recommendation||sc.defaultRec,
+        customNotes:'',screenshots:sec.screenshots||[],
+        tableColumns:sec.tableColumns||[],tableRows:sec.tableRows||[],
+        chartImage:sec.chartImage||null,inputMode:sec.inputMode||null};
+    }),
+  };
+}
+
+// ─── PARSED DATA TABLE ───────────────────────────────────────────────────────
+function ParsedDataTable({columns,rows,flaggedRows,flaggedCol}){
+  if(!rows||!rows.length)return(<div style={{textAlign:'center',padding:24,color:'#7a8f9e',fontSize:13}}>No data available for this section.</div>);
+  return(
+    <div style={{overflowX:'auto'}}>
+      <table style={{width:'100%',borderCollapse:'collapse',fontSize:12}}>
+        <thead><tr>{columns.map((col,i)=>(
+          <th key={i} style={{background:'#0f4c75',color:'#fff',padding:'7px 10px',textAlign:'left',fontWeight:700,whiteSpace:'nowrap',fontSize:11}}>{col}</th>
+        ))}</tr></thead>
+        <tbody>{rows.map((row,ri)=>(
+          <tr key={ri} style={{background:flaggedRows?.[ri]?'#fff5f5':(ri%2===0?'#fff':'#f9fbfc')}}>
+            {(row||[]).map((cell,ci)=>(
+              <td key={ci} style={{padding:'6px 10px',border:'1px solid #edf1f5',fontSize:12,
+                color:(flaggedRows?.[ri]&&ci===flaggedCol)?'#e53e3e':'#1a2b3c',
+                fontWeight:(flaggedRows?.[ri]&&ci===flaggedCol)?700:400,
+                whiteSpace:ci===0||ci===columns.length-1?'nowrap':'normal'}}>
+                {cell??''}
+              </td>
+            ))}
+          </tr>
+        ))}</tbody>
+      </table>
+    </div>
+  );
+}
+
+// ─── DB SUMMARY TAB ──────────────────────────────────────────────────────────
+function DbSummaryTab({db}){
+  const p=db.parsed;
+  const items=[
+    ['Hostname',p.hostname?.hostname],['Database Name',p.status?.dbName],
+    ['Database Role',p.status?.dbRole],['Open Mode',p.status?.openMode],
+    ['Operating System',p.hostname?.osName],
+    ['CPU',p.cpuInfo?.cpuCount?(p.cpuInfo.cpuCount+' vCPUs — '+p.cpuInfo.cpuModel):null],
+    ['Memory (Total)',p.memory?.totalGb?(p.memory.totalGb.toFixed(0)+' GB'):null],
+    ['Protection Mode',p.status?.protectionMode],
+    ['MRP0 Status',p.status?.isStandby?(p.status.mrpStatus||'Unknown'):null],
+  ].filter(([,v])=>v);
+  return(
+    <div>
+      <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:'6px 24px',marginBottom:24,padding:'16px',background:'#f7fafc',borderRadius:10}}>
+        {items.map(([k,v])=>(
+          <div key={k} style={{display:'flex',gap:8,alignItems:'baseline'}}>
+            <span style={{color:'#7a8f9e',fontSize:12,minWidth:110,flexShrink:0}}>{k}</span>
+            <span style={{fontSize:13,fontWeight:600,color:'#0f2b3d'}}>{v}</span>
+          </div>
+        ))}
+      </div>
+      {db.flags.length>0&&(
+        <div>
+          <div style={{fontSize:12,fontWeight:700,color:'#0f2b3d',marginBottom:10,textTransform:'uppercase',letterSpacing:'0.05em'}}>Detected Issues</div>
+          {db.flags.map((flag,i)=>(
+            <div key={i} style={{display:'flex',gap:12,padding:'10px 14px',borderRadius:8,marginBottom:6,
+              background:flag.severity==='critical'?'#fff5f5':'#fffbeb',
+              border:`1px solid ${flag.severity==='critical'?'#fed7d7':'#fef08a'}`}}>
+              <span style={{fontSize:16}}>{flag.severity==='critical'?'🔴':'⚠️'}</span>
+              <div>
+                <div style={{fontSize:13,fontWeight:600,color:flag.severity==='critical'?'#c53030':'#92400e'}}>{flag.section} — {flag.item}</div>
+                <div style={{fontSize:12,color:'#7a8f9e',marginTop:2}}>{flag.message}</div>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+      {db.flags.length===0&&(<div style={{textAlign:'center',padding:20,color:'#16a34a',fontWeight:600,fontSize:14}}>✓ No threshold violations detected</div>)}
+    </div>
+  );
+}
+
+// ─── STEP 0: LOAD DATA ───────────────────────────────────────────────────────
+function StepLoad({onLoad,logoData,setLogoData,clientLogoData,setClientLogoData,backendStatus,setMeta}){
+  const[loading,setLoading]=useState(false);
+  const[progress,setProgress]=useState([]);
+  const[error,setError]=useState(null);
+  const[snapshotCount,setSnapshotCount]=useState(0);
+  const[folderPath,setFolderPath]=useState('');
+  const[validation,setValidation]=useState(null);
+  const[validating,setValidating]=useState(false);
+  const[extracting,setExtracting]=useState(false);
+  const[validateError,setValidateError]=useState(null);
+  const[extractError,setExtractError]=useState(null);
+  const[tmplList,setTmplList]=useState(()=>sto.getTemplates());
+  const[selTmplId,setSelTmplId]=useState('');
+  const[tmplLoaded,setTmplLoaded]=useState(false);
+  const[subfolders,setSubfolders]=useState([]);
+  const[checkedSubs,setCheckedSubs]=useState(new Set());
+  const[extractProgress,setExtractProgress]=useState([]);
+  const handleValidate=async()=>{
+    if(!folderPath.trim())return;
+    setValidating(true);setValidation(null);setValidateError(null);setExtractError(null);setSubfolders([]);setCheckedSubs(new Set());setExtractProgress([]);
+    try{
+      const res=await fetch('http://localhost:8000/validate',{method:'POST',
+        headers:{'Content-Type':'application/json'},body:JSON.stringify({path:folderPath.trim()})});
+      const v=await res.json();
+      setValidation(v);
+      if(v.type==='multi'){setSubfolders(v.subfolders||[]);setCheckedSubs(new Set((v.subfolders||[]).map(s=>s.path)));}
+    }catch(e){setValidateError('Cannot reach backend. Is "uvicorn server:app --reload" running?');}
+    finally{setValidating(false);}
+  };
+
+  const handleExtract=async()=>{
+    if(!folderPath.trim())return;
+    // Multi-folder extract
+    if(validation?.type==='multi'){
+      const selected=subfolders.filter(s=>checkedSubs.has(s.path));
+      if(!selected.length)return;
+      setExtracting(true);setExtractProgress([]);setExtractError(null);
+      const results=[];
+      for(const sub of selected){
+        setExtractProgress(p=>[...p,`⚙ Extracting ${sub.name}...`]);
+        const t0=Date.now();
+        try{
+          const res=await fetch('http://localhost:8000/extract',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:sub.path})});
+          const data=await res.json();
+          if(!data.error){results.push(loadSnapshotJson(data));setExtractProgress(p=>[...p.slice(0,-1),`✓ ${sub.name} (${((Date.now()-t0)/1000).toFixed(1)}s)`]);}
+          else{setExtractProgress(p=>[...p.slice(0,-1),`✗ ${sub.name}: ${data.error}`]);}
+        }catch{setExtractProgress(p=>[...p.slice(0,-1),`✗ ${sub.name}: connection error`]);}
+      }
+      setExtracting(false);
+      if(results.length)setTimeout(()=>onLoad(results),600);
+      return;
+    }
+    // Single-folder extract
+    setExtracting(true);setExtractError(null);
+    try{
+      const res=await fetch('http://localhost:8000/extract',{method:'POST',
+        headers:{'Content-Type':'application/json'},body:JSON.stringify({path:folderPath.trim()})});
+      const data=await res.json();
+      if(data.error){setExtractError(data.error);return;}
+      onLoad([loadSnapshotJson(data)]);
+    }catch(e){setExtractError('Cannot reach backend. Is "uvicorn server:app --reload" running?');}
+    finally{setExtracting(false);}
+  };
+
+  const handleSnapshotJson=async(e)=>{
+    const files=Array.from(e.target.files);
+    if(!files.length)return;
+    setError(null);
+    const loaded=[];
+    for(const file of files){
+      try{
+        const text=await file.text();
+        loaded.push(loadSnapshotJson(JSON.parse(text)));
+      }catch(err){setError('Invalid snapshot JSON: '+file.name+' — '+err.message);return;}
+    }
+    if(loaded.length){setSnapshotCount(loaded.length);setTimeout(()=>onLoad(loaded),400);}
+  };
+  const addLog=msg=>setProgress(p=>[...p,msg]);
+  const handleLogoUpload=e=>{
+    const file=e.target.files[0];if(!file)return;
+    const reader=new FileReader();
+    reader.onload=ev=>{const bytes=new Uint8Array(ev.target.result);const type=file.type==='image/png'?'png':'jpg';setLogoData({data:bytes,type,name:file.name})};
+    reader.readAsArrayBuffer(file);
+  };
+  const handleClientLogoUpload=e=>{
+    const file=e.target.files[0];if(!file)return;
+    const reader=new FileReader();
+    reader.onload=ev=>{const bytes=new Uint8Array(ev.target.result);const type=file.type==='image/png'?'png':'jpg';setClientLogoData({data:bytes,type,name:file.name})};
+    reader.readAsArrayBuffer(file);
+  };
+
+  const handleBrowse=async()=>{
+    try{
+      const res=await fetch('http://localhost:8000/browse-folder');
+      const data=await res.json();
+      if(data.path)setFolderPath(data.path);
+    }catch{}
+  };
+
+  const canExtract=validation&&(validation.type==='multi'?checkedSubs.size>0:!!validation.status);
+  const valStatusColor=!validation?'#7a8f9e':validation.status==='ok'?'#16a34a':validation.status==='warning'?'#d97706':'#b91c1c';
+  const valStatusBg=!validation?'#f7fafc':validation.status==='ok'?'#f0fdf4':validation.status==='warning'?'#fffbeb':'#fff5f5';
+
+  return(
+    <div style={{maxWidth:520,margin:'0 auto',paddingTop:32}}>
+      <div style={{marginBottom:40,animation:'fadeUp 0.5s ease both'}}>
+        <div style={{fontSize:13,fontWeight:700,color:'#1b9aaa',letterSpacing:'0.06em',textTransform:'uppercase',marginBottom:10}}>Step 1 of 4</div>
+        <h1 style={{fontSize:34,fontWeight:900,color:'#0f2b3d',letterSpacing:'-0.03em',marginBottom:10,lineHeight:1.1}}>Load Database Files</h1>
+        <p style={{color:'#5a7184',fontSize:14,lineHeight:1.7}}>
+          Select the host folder (e.g. <code style={{background:'#e8f0f8',padding:'2px 6px',borderRadius:4,fontSize:12}}>exakai04db01</code>) or a single database subfolder. All diagnostic .txt files will be parsed automatically.
+        </p>
+      </div>
+
+      {/* ── Saved Templates ─────────────────────────────────────────────── */}
+      {tmplList.length>0&&(
+        <div style={{marginBottom:16,padding:'16px',background:'#fff',borderRadius:12,border:'1px solid #e2eaf0',animation:'fadeUp 0.4s ease both'}}>
+          <div style={{fontSize:13,fontWeight:700,color:'#0f2b3d',marginBottom:10}}>Saved Templates</div>
+          <div style={{display:'flex',gap:8,alignItems:'center',flexWrap:'wrap'}}>
+            <select value={selTmplId} onChange={e=>setSelTmplId(e.target.value)} style={{...S.inp,flex:1,padding:'7px 10px',fontSize:13}}>
+              <option value="">— Select template —</option>
+              {tmplList.map(t=><option key={t.id} value={t.id}>{t.name} ({t.savedAt})</option>)}
+            </select>
+            <button disabled={!selTmplId} onClick={()=>{const t=tmplList.find(x=>x.id===selTmplId);if(t){setMeta(t.meta);setTmplLoaded(true);setTimeout(()=>setTmplLoaded(false),2000)}}}
+              style={{...S.pb,padding:'7px 16px',fontSize:13,opacity:selTmplId?1:0.5}}>Load</button>
+            <button disabled={!selTmplId} onClick={()=>{sto.deleteTemplate(selTmplId);setTmplList(sto.getTemplates());setSelTmplId('')}}
+              style={{padding:'7px 12px',borderRadius:8,border:'1px solid #fca5a5',background:'#fff5f5',color:'#b91c1c',cursor:'pointer',fontSize:13,fontWeight:700,opacity:selTmplId?1:0.5}}>×</button>
+          </div>
+          {tmplLoaded&&<div style={{marginTop:8,fontSize:12,color:'#16a34a',fontWeight:600}}>✓ Template loaded — edit in Step 3</div>}
+        </div>
+      )}
+
+      {/* ── Backend Path Input (Method A) ─────────────────────────────── */}
+      <div style={{marginBottom:16,padding:'18px',background:'#fff',borderRadius:12,border:'1px solid #e2eaf0',animation:'fadeUp 0.45s ease both'}}>
+        <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:12}}>
+          <div style={{fontSize:13,fontWeight:700,color:'#0f2b3d'}}>Load via Backend API</div>
+          <div style={{marginLeft:'auto',display:'flex',alignItems:'center',gap:5,fontSize:11,fontWeight:700,
+            color:backendStatus==='ok'?'#16a34a':backendStatus==='offline'?'#b91c1c':'#d97706'}}>
+            <div style={{width:7,height:7,borderRadius:'50%',background:backendStatus==='ok'?'#16a34a':backendStatus==='offline'?'#b91c1c':'#d97706',
+              animation:backendStatus==='checking'?'pulse 1.2s infinite':undefined}}/>
+            {backendStatus==='ok'?'Backend online':backendStatus==='offline'?'Backend offline':'Checking...'}
+          </div>
+        </div>
+        {backendStatus==='offline'&&(
+          <div style={{background:'#fef9c3',border:'1px solid #f6e05e',borderRadius:8,padding:'10px 12px',marginBottom:10,fontSize:12,color:'#854d0e'}}>
+            Start backend: <code style={{background:'rgba(0,0,0,0.06)',padding:'1px 5px',borderRadius:3}}>uvicorn server:app --reload</code>
+          </div>
+        )}
+        <div style={{display:'flex',gap:8,marginBottom:8}}>
+          <input value={folderPath} onChange={e=>setFolderPath(e.target.value)}
+            onKeyDown={e=>{if(e.key==='Enter')handleValidate();}}
+            placeholder="e.g. D:\Database Data\exakai04db01\MBSHIP1"
+            style={{...S.inp,flex:1,fontSize:12}} disabled={backendStatus!=='ok'}/>
+          <button onClick={handleBrowse} disabled={backendStatus!=='ok'}
+            style={{padding:'9px 14px',borderRadius:8,border:'1px solid #d0dce4',background:'#f7fafc',color:'#0f2b3d',fontSize:12,fontWeight:600,cursor:'pointer',whiteSpace:'nowrap',opacity:backendStatus!=='ok'?0.5:1}}>
+            Browse…
+          </button>
+          <button onClick={handleValidate} disabled={!folderPath.trim()||validating||backendStatus!=='ok'}
+            style={{...S.pb,padding:'9px 14px',fontSize:12,opacity:(!folderPath.trim()||backendStatus!=='ok')?0.5:1,whiteSpace:'nowrap'}}>
+            {validating?'Checking…':'Validate'}
+          </button>
+        </div>
+        {validateError&&<div style={{fontSize:12,color:'#b91c1c',marginBottom:8}}>{validateError}</div>}
+
+        {/* Validity Panel */}
+        {validation&&validation.type==='multi'?(
+          <div style={{marginTop:4,padding:'12px 14px',background:'#f0fafb',borderRadius:9,border:'1px solid #b0d4e833'}}>
+            <div style={{fontSize:13,fontWeight:700,color:'#0f4c75',marginBottom:10}}>
+              Found {subfolders.length} database folder{subfolders.length!==1?'s':''} — select to extract:
+            </div>
+            {subfolders.map(s=>(
+              <div key={s.path} style={{display:'flex',alignItems:'center',gap:8,marginBottom:5}}>
+                <input type="checkbox" checked={checkedSubs.has(s.path)}
+                  onChange={e=>{const ns=new Set(checkedSubs);e.target.checked?ns.add(s.path):ns.delete(s.path);setCheckedSubs(ns)}}
+                  style={{accentColor:'#1b9aaa'}}/>
+                <span style={{fontSize:13,fontWeight:600,color:'#0f2b3d'}}>{s.name}</span>
+                <span style={{fontSize:11,color:s.status==='ok'?'#16a34a':s.status==='warning'?'#d97706':'#b91c1c',fontWeight:600}}>
+                  {s.status==='ok'?'✅ Ready':s.status==='warning'?'⚠ Warning':'❌ Error'}
+                </span>
+              </div>
+            ))}
+            <div style={{display:'flex',gap:8,marginTop:8,marginBottom:10}}>
+              <button onClick={()=>setCheckedSubs(new Set(subfolders.map(s=>s.path)))} style={{fontSize:11,color:'#1b9aaa',background:'none',border:'1px solid #b0d4e8',borderRadius:6,padding:'3px 10px',cursor:'pointer'}}>Select All</button>
+              <button onClick={()=>setCheckedSubs(new Set())} style={{fontSize:11,color:'#5a7184',background:'none',border:'1px solid #d0dce4',borderRadius:6,padding:'3px 10px',cursor:'pointer'}}>Deselect All</button>
+            </div>
+            <button onClick={handleExtract} disabled={checkedSubs.size===0||extracting}
+              style={{...S.pb,padding:'9px 18px',fontSize:13,opacity:(checkedSubs.size===0||extracting)?0.5:1}}>
+              {extracting?'Extracting…':`⚡ Extract Selected (${checkedSubs.size})`}
+            </button>
+            {extractProgress.length>0&&(
+              <div style={{marginTop:10,fontFamily:'monospace',fontSize:12,color:'#5a7184',lineHeight:1.8}}>
+                {extractProgress.map((msg,i)=><div key={i}>{msg}</div>)}
+              </div>
+            )}
+            {extractError&&<div style={{fontSize:12,color:'#b91c1c',marginTop:8}}>{extractError}</div>}
+          </div>
+        ):validation&&(
+          <div style={{marginTop:4,padding:'12px 14px',background:valStatusBg,borderRadius:9,border:`1px solid ${valStatusColor}33`}}>
+            <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:10}}>
+              <span style={{fontSize:13,fontWeight:700,color:valStatusColor}}>
+                {validation.status==='ok'?'✓ All checks passed':validation.status==='warning'?'⚠ Warnings (can still load)':'✗ Errors found'}
+              </span>
+            </div>
+            {[{title:'Files',items:(validation.files||[]).map(f=>({name:f.name,found:f.found,sev:f.severity}))},
+              {title:'HTML Anchors',items:(validation.tables||[]).map(t=>({name:t.anchor,found:t.found,sev:t.severity}))}]
+              .filter(g=>g.items.length>0).map(group=>(
+              <div key={group.title} style={{marginBottom:8}}>
+                <div style={{fontSize:10,fontWeight:700,color:'#5a7184',letterSpacing:'0.06em',textTransform:'uppercase',marginBottom:4}}>{group.title}</div>
+                {group.items.map((item,i)=>(
+                  <div key={i} style={{display:'flex',alignItems:'center',gap:7,fontSize:11,padding:'2px 0'}}>
+                    <span style={{fontSize:13,lineHeight:1}}>{item.found?'✅':item.sev==='error'?'❌':'⚠️'}</span>
+                    <span style={{color:!item.found&&item.sev==='error'?'#b91c1c':!item.found&&item.sev==='warning'?'#d97706':'#1a2b3c'}}>
+                      {item.name}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            ))}
+            <button onClick={handleExtract} disabled={!canExtract||extracting}
+              style={{...S.pb,marginTop:8,padding:'9px 18px',fontSize:13,opacity:(!canExtract||extracting)?0.5:1}}>
+              {extracting?<><span style={{display:'inline-block',width:12,height:12,border:'2px solid rgba(255,255,255,0.4)',borderTopColor:'#fff',borderRadius:'50%',animation:'spin 0.7s linear infinite',marginRight:6}}/>Extracting…</>:'⚡ Extract & Load'}
+            </button>
+            {validation.status==='warning'&&!canExtract===false&&(
+              <div style={{fontSize:11,color:'#d97706',marginTop:6}}>Some optional files are missing but extraction can proceed.</div>
+            )}
+            {extractError&&<div style={{fontSize:12,color:'#b91c1c',marginTop:8}}>{extractError}</div>}
+          </div>
+        )}
+      </div>
+
+      {error&&(<div style={{background:'#fff5f5',border:'1px solid #fca5a5',borderRadius:10,padding:'14px 18px',marginBottom:12,color:'#b91c1c',fontSize:13}}>{error}</div>)}
+      {loading?(
+        <div style={{...S.card,padding:28}}>
+          <div style={{display:'flex',gap:6,justifyContent:'center',marginBottom:20}}>
+            {[0,1,2].map(i=><div key={i} style={{width:9,height:9,borderRadius:'50%',background:'#1b9aaa',animation:`pulse 1.2s ${i*0.22}s infinite`}}/>)}
+          </div>
+          <div style={{fontFamily:'monospace',fontSize:12,color:'#5a7184',maxHeight:220,overflowY:'auto',lineHeight:1.8}}>
+            {progress.map((msg,i)=><div key={i} style={{animation:`fadeUp 0.3s ease both`,animationDelay:`${i*0.08}s`}}>{msg}</div>)}
+          </div>
+        </div>
+      ):(
+        <div>
+          <div style={{marginTop:16,padding:'16px',background:'#fff',borderRadius:12,border:'1px solid #e2eaf0'}}>
+            <div style={{fontSize:12,fontWeight:700,color:'#0f2b3d',marginBottom:10}}>Logos <span style={{fontWeight:400,color:'#7a8f9e'}}>(optional)</span></div>
+            <div style={{display:'flex',gap:12,flexWrap:'wrap'}}>
+              <div>
+                <div style={{fontSize:11,color:'#5a7184',marginBottom:5}}>Company Logo <span style={{color:'#a0b4c0'}}>(cover & header)</span></div>
+                <label style={{display:'inline-flex',alignItems:'center',gap:8,cursor:'pointer',padding:'9px 16px',borderRadius:8,border:'1px dashed #b0c4d0',fontSize:13,color:'#1b9aaa',fontWeight:600,background:'#f7fafc'}}>
+                  🖼 Upload
+                  <input type="file" accept="image/png,image/jpeg" onChange={handleLogoUpload} style={{display:'none'}}/>
+                </label>
+                {logoData&&<div style={{marginTop:5,fontSize:11,color:'#16a34a',fontWeight:600}}>✓ {logoData.name}</div>}
+              </div>
+              <div>
+                <div style={{fontSize:11,color:'#5a7184',marginBottom:5}}>Client Logo <span style={{color:'#a0b4c0'}}>(cover page)</span></div>
+                <label style={{display:'inline-flex',alignItems:'center',gap:8,cursor:'pointer',padding:'9px 16px',borderRadius:8,border:'1px dashed #b0c4d0',fontSize:13,color:'#1b9aaa',fontWeight:600,background:'#f7fafc'}}>
+                  🖼 Upload
+                  <input type="file" accept="image/png,image/jpeg" onChange={handleClientLogoUpload} style={{display:'none'}}/>
+                </label>
+                {clientLogoData&&<div style={{marginTop:5,fontSize:11,color:'#16a34a',fontWeight:600}}>✓ {clientLogoData.name}</div>}
+              </div>
+            </div>
+          </div>
+          <div style={{marginTop:12,padding:'16px',background:'#fff',borderRadius:12,border:'1px solid #e2eaf0'}}>
+            <div style={{fontSize:12,fontWeight:700,color:'#0f2b3d',marginBottom:8}}>
+              Load from Snapshot JSON
+              <span style={{fontWeight:400,color:'#7a8f9e',marginLeft:6}}>(generated by extract_snapshot.py)</span>
+            </div>
+            <label style={{display:'inline-flex',alignItems:'center',gap:8,cursor:'pointer',padding:'9px 16px',borderRadius:8,border:'1px dashed #b0c4d0',fontSize:13,color:'#1b9aaa',fontWeight:600,background:'#f7fafc'}}>
+              📊 Load Snapshot JSON
+              <input type="file" accept=".json" multiple onChange={handleSnapshotJson} style={{display:'none'}}/>
+            </label>
+            {snapshotCount>0&&<div style={{marginTop:8,fontSize:12,color:'#16a34a',fontWeight:600}}>✓ {snapshotCount} snapshot(s) loaded</div>}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── STEP 1: REVIEW ──────────────────────────────────────────────────────────
+function StepReview({databases,onNext}){
+  const[expanded,setExpanded]=useState({[databases[0]?.folderName]:true});
+  const[activeTab,setActiveTab]=useState({});
+  const tog=id=>setExpanded(p=>({...p,[id]:!p[id]}));
+  const getTab=id=>activeTab[id]||'summary';
+  const setTab=(id,tab)=>setActiveTab(p=>({...p,[id]:tab}));
+  const totalFlags=databases.reduce((s,db)=>s+db.flags.length,0);
+  const TABS=['summary','sysinfo','tablespace','mountpoints','rman','sessions','cpu'];
+  return(
+    <div>
+      <div style={{marginBottom:28,animation:'fadeUp 0.4s ease both'}}>
+        <div style={{fontSize:13,fontWeight:700,color:'#1b9aaa',letterSpacing:'0.06em',textTransform:'uppercase',marginBottom:8}}>Step 2 of 4</div>
+        <h1 style={{fontSize:34,fontWeight:900,color:'#0f2b3d',letterSpacing:'-0.03em',marginBottom:6,lineHeight:1.1}}>Data Review</h1>
+        <p style={{color:'#5a7184',fontSize:14}}>
+          {databases.length} database{databases.length!==1?'s':''} loaded &nbsp;·&nbsp;
+          <span style={{color:totalFlags>0?'#e53e3e':'#16a34a',fontWeight:700}}>
+            {totalFlags>0?`${totalFlags} issue${totalFlags!==1?'s':''} flagged`:'✓ No issues detected'}
+          </span>
+        </p>
+      </div>
+      {databases.map((db,idx)=>{
+        const crit=db.flags.filter(f=>f.severity==='critical').length;
+        const warn=db.flags.filter(f=>f.severity==='warning').length;
+        const isOpen=expanded[db.folderName];
+        return(
+          <div key={db.folderName} style={{...S.card,marginBottom:12,padding:0,overflow:'hidden',animation:`fadeUp 0.35s ease both`,animationDelay:`${idx*0.06}s`}}>
+            <div onClick={()=>tog(db.folderName)} style={{display:'flex',alignItems:'center',gap:14,padding:'18px 22px',cursor:'pointer',background:isOpen?'#f7fafc':'#fff'}}>
+              <div style={{width:42,height:42,borderRadius:11,background:'linear-gradient(135deg,#0f4c75,#1b9aaa)',display:'flex',alignItems:'center',justifyContent:'center',flexShrink:0}}>
+                <span style={{color:'#fff',fontWeight:900,fontSize:15}}>{db.folderName[0].toUpperCase()}</span>
+              </div>
+              <div style={{flex:1}}>
+                <div style={{fontWeight:800,fontSize:15,color:'#0f2b3d'}}>{db.folderName}</div>
+                <div style={{fontSize:12,color:'#7a8f9e'}}>{db.parsed.hostname?.hostname||''}{db.parsed.hostname?.osName?' · '+db.parsed.hostname.osName:''}</div>
+              </div>
+              <div style={{display:'flex',gap:8,alignItems:'center'}}>
+                {crit>0&&<span style={{...S.tag,background:'#fff5f5',color:'#e53e3e'}}>🔴 {crit} critical</span>}
+                {warn>0&&<span style={{...S.tag,background:'#fffbeb',color:'#d97706'}}>⚠ {warn} warning{warn!==1?'s':''}</span>}
+                {db.flags.length===0&&<span style={{...S.tag,background:'#f0fdf4',color:'#16a34a'}}>✓ OK</span>}
+                <span style={{color:'#a0b4c0',fontSize:11,marginLeft:4}}>{isOpen?'▲':'▼'}</span>
+              </div>
+            </div>
+            {isOpen&&(
+              <div>
+                <div style={{display:'flex',borderBottom:'2px solid #f0f4f8',padding:'0 22px',gap:0,overflowX:'auto'}}>
+                  {TABS.map(tab=>(
+                    <button key={tab} onClick={()=>setTab(db.folderName,tab)} style={{background:'none',border:'none',padding:'10px 14px',cursor:'pointer',fontSize:12,fontWeight:600,whiteSpace:'nowrap',color:getTab(db.folderName)===tab?'#0f4c75':'#7a8f9e',borderBottom:getTab(db.folderName)===tab?'2px solid #1b9aaa':'2px solid transparent',marginBottom:-2}}>
+                      {tab.charAt(0).toUpperCase()+tab.slice(1)}
+                    </button>
+                  ))}
+                </div>
+                <div style={{padding:'20px 22px'}}>
+                  {getTab(db.folderName)==='summary'&&<DbSummaryTab db={db}/>}
+                  {getTab(db.folderName)==='sysinfo'&&(()=>{
+                    const si=db.parsed.serverInfo||{};const di=db.parsed.databaseInfo||{};
+                    const hasSi=Object.values(si).some(v=>v);const hasDi=Object.values(di).some(v=>v);
+                    const InfoTable=({title,rows})=>(
+                      <div style={{marginBottom:16}}>
+                        <div style={{fontWeight:700,fontSize:13,color:'#0f2b3d',marginBottom:6,paddingBottom:4,borderBottom:'1px solid #e2eaf0'}}>{title}</div>
+                        <table style={{width:'100%',borderCollapse:'collapse',fontSize:12}}>
+                          <tbody>{rows.filter(([,v])=>v).map(([k,v])=>(
+                            <tr key={k}>
+                              <td style={{padding:'5px 10px',border:'1px solid #edf1f5',fontWeight:600,color:'#5a7184',width:'36%',background:'#f7fafc',whiteSpace:'nowrap'}}>{k}</td>
+                              <td style={{padding:'5px 10px',border:'1px solid #edf1f5',wordBreak:'break-all'}}>{v}</td>
+                            </tr>
+                          ))}</tbody>
+                        </table>
+                      </div>
+                    );
+                    if(!hasSi&&!hasDi)return(
+                      <div style={{textAlign:'center',padding:24,color:'#7a8f9e',fontSize:13}}>
+                        No system info available. Use the backend API (path input) to extract full server & database info.
+                      </div>
+                    );
+                    return(
+                      <div>
+                        {hasSi&&<InfoTable title="Server" rows={[
+                          ['Hostname',si.hostname],['IP Address',si.ip],['Domain',si.domainName],
+                          ['Operating System',si.os],['Kernel',si.kernel],['Virtualization',si.virtualization],
+                          ['CPU(s)',si.cpus],['CPU Model',si.systemModel],['Vendor',si.vendorProcessor],
+                          ['Total Memory',si.totalMemory],
+                        ]}/>}
+                        {hasDi&&<InfoTable title="Database" rows={[
+                          ['Instance Name',di.instanceName],['Instance Status',di.instanceStatus],
+                          ['Startup Time',di.instanceStartupTime],['Oracle Version',di.instanceVersion],
+                          ['Database Name',di.databaseName],['DB Unique Name',di.dbUniqueName],
+                          ['Created',di.databaseCreated],['Open Mode',di.openMode],
+                          ['Archive Mode',di.archiveMode],['Character Set',di.characterSet],
+                          ['Compatibility',di.compatibility],['SPFILE',di.spfile],
+                        ]}/>}
+                      </div>
+                    );
+                  })()}
+                  {getTab(db.folderName)==='tablespace'&&<ParsedDataTable
+                    columns={['Tablespace','Curr Size (MB)','Used (MB)','Used %','Free (MB)']}
+                    rows={(db.parsed.tablespace?.rows||[]).map(r=>[r.tablespaceName,r.currTsSize?.toFixed(0),r.usedTsSize?.toFixed(0),r.tsPctUsed?.toFixed(2)+'%',r.freeTsSize?.toFixed(0)])}
+                    flaggedRows={(db.parsed.tablespace?.rows||[]).map(r=>r.flagged)} flaggedCol={3}/>}
+                  {getTab(db.folderName)==='mountpoints'&&<ParsedDataTable
+                    columns={['Filesystem','Size','Used','Available','Use%','Mounted On']}
+                    rows={(db.parsed.mountpoint?.rows||[]).map(r=>[r.filesystem,r.size,r.used,r.avail,r.pct+'%',r.mountOn])}
+                    flaggedRows={(db.parsed.mountpoint?.rows||[]).map(r=>r.flagged)} flaggedCol={4}/>}
+                  {getTab(db.folderName)==='rman'&&<ParsedDataTable
+                    columns={['Type','Status','Start Time','Duration','Input (GB)','Output (GB)']}
+                    rows={(db.parsed.rman?.rows||[]).map(r=>[r.inputType,r.status,r.startTime,r.timeTaken,r.inputSizeGb?.toFixed(1),r.outputSizeGb?.toFixed(1)])}
+                    flaggedRows={(db.parsed.rman?.rows||[]).map(r=>r.flagged)} flaggedCol={1}/>}
+                  {getTab(db.folderName)==='sessions'&&<ParsedDataTable
+                    columns={['Instance','Begin Time','Current','Max','Used %']}
+                    rows={(db.parsed.sessions?.rows||[]).slice(0,40).map(r=>['Inst '+r.instanceNum,r.beginTime,r.current?.toFixed(0),r.max?.toFixed(0),(r.ratio*100).toFixed(1)+'%'])}
+                    flaggedRows={(db.parsed.sessions?.rows||[]).slice(0,40).map(r=>r.flagged)} flaggedCol={4}/>}
+                  {getTab(db.folderName)==='cpu'&&db.parsed.cpuUtils?.rows?.length>0&&(
+                    <CpuChart columns={db.parsed.cpuUtils.columns} rows={db.parsed.cpuUtils.rows.slice(0,200)} onCanvasReady={()=>{}}/>
+                  )}
+                  {getTab(db.folderName)==='cpu'&&!db.parsed.cpuUtils?.rows?.length&&(
+                    <div style={{textAlign:'center',padding:24,color:'#7a8f9e',fontSize:13}}>No CPU data available (cpu_utils.txt not found).</div>
+                  )}
+                </div>
+              </div>
+            )}
+          </div>
+        );
+      })}
+      <div style={{marginTop:28,display:'flex',justifyContent:'flex-end'}}>
+        <button onClick={onNext} style={{...S.pb,padding:'13px 30px',fontSize:14}}>Continue to Edit →</button>
+      </div>
+    </div>
+  );
+}
+
+// ─── STEP 2: EDIT ────────────────────────────────────────────────────────────
+function StepEdit({databases,meta,setMeta,setDatabases,onNext}){
+  const[activeDb,setActiveDb]=useState(databases[0]?.folderName||'');
+  const[expanded,setExpanded]=useState({});
+  const[renamingId,setRenamingId]=useState(null);
+  const[renameVal,setRenameVal]=useState('');
+  const[newSecName,setNewSecName]=useState('');
+  const[saveName,setSaveName]=useState('');
+  const[saveOpen,setSaveOpen]=useState(false);
+  const[savedToast,setSavedToast]=useState(false);
+  const tog=key=>setExpanded(p=>({...p,[key]:!p[key]}));
+  const uMeta=(f,v)=>setMeta(p=>({...p,[f]:v}));
+  const uRev=(i,f,v)=>setMeta(p=>{const r=[...p.reviewers];r[i]={...r[i],[f]:v};return{...p,reviewers:r}});
+  const db=databases.find(d=>d.folderName===activeDb);
+  const dbIdx=databases.findIndex(d=>d.folderName===activeDb);
+  const uSec=(secId,f,v)=>setDatabases(prev=>{const dbs=[...prev];const d={...dbs[dbIdx],sections:{...dbs[dbIdx].sections,[secId]:{...dbs[dbIdx].sections[secId],[f]:v}}};dbs[dbIdx]=d;return dbs});
+  const uIssue=(i,f,v)=>setDatabases(prev=>{const dbs=[...prev];const issues=[...dbs[dbIdx].exaSummaryIssues];issues[i]={...issues[i],[f]:v};dbs[dbIdx]={...dbs[dbIdx],exaSummaryIssues:issues};return dbs});
+  const addIssue=()=>setDatabases(prev=>{const dbs=[...prev];dbs[dbIdx]={...dbs[dbIdx],exaSummaryIssues:[...dbs[dbIdx].exaSummaryIssues,{section:'',problem:'',recommendation:'',risk:'Medium',impact:'Low',comment:''}]};return dbs});
+  const delIssue=i=>setDatabases(prev=>{const dbs=[...prev];dbs[dbIdx]={...dbs[dbIdx],exaSummaryIssues:dbs[dbIdx].exaSummaryIssues.filter((_,j)=>j!==i)};return dbs});
+  const uScConf=(i,f,v)=>setMeta(p=>{const sc=[...p.sectionsConfig];sc[i]={...sc[i],[f]:v};return{...p,sectionsConfig:sc}});
+  const moveSecConf=(i,dir)=>setMeta(p=>{const sc=[...p.sectionsConfig];const j=i+dir;if(j<0||j>=sc.length)return p;[sc[i],sc[j]]=[sc[j],sc[i]];return{...p,sectionsConfig:sc}});
+  const delSecConf=i=>setMeta(p=>({...p,sectionsConfig:p.sectionsConfig.filter((_,j)=>j!==i)}));
+  const addCustomSec=()=>{
+    if(!newSecName.trim())return;
+    const id='custom_'+Date.now();
+    setMeta(p=>({...p,sectionsConfig:[...p.sectionsConfig,{id,name:newSecName.trim(),enabled:true,contentType:'table',defaultRec:'',isCustom:true}]}));
+    setDatabases(prev=>prev.map(d=>({...d,sections:{...d.sections,[id]:{tableColumns:[],tableRows:[],screenshots:[]}}})));
+    setNewSecName('');
+  };
+  const handleScreenshotUpload=(secId,e)=>{
+    const files=Array.from(e.target.files);if(!files.length)return;
+    files.forEach(file=>{
+      const reader=new FileReader();
+      reader.onload=ev=>{const type=file.type==='image/png'?'png':'jpg';
+        setDatabases(prev=>{const dbs=[...prev];const idx2=dbs.findIndex(d=>d.folderName===activeDb);if(idx2<0)return prev;const sec=dbs[idx2].sections[secId]||{};const ss=[...(sec.screenshots||[]),{data:ev.target.result,type,name:file.name}];dbs[idx2]={...dbs[idx2],sections:{...dbs[idx2].sections,[secId]:{...sec,screenshots:ss}}};return[...dbs]});
+      };reader.readAsDataURL(file);
+    });
+  };
+  const removeScreenshot=(secId,si)=>setDatabases(prev=>{const dbs=[...prev];const idx2=dbs.findIndex(d=>d.folderName===activeDb);if(idx2<0)return prev;const sec=dbs[idx2].sections[secId]||{};const ss=(sec.screenshots||[]).filter((_,j)=>j!==si);dbs[idx2]={...dbs[idx2],sections:{...dbs[idx2].sections,[secId]:{...sec,screenshots:ss}}};return[...dbs]});
+
+  return(
+    <div>
+      <div style={{marginBottom:24,animation:'fadeUp 0.4s ease both'}}>
+        <div style={{fontSize:13,fontWeight:700,color:'#1b9aaa',letterSpacing:'0.06em',textTransform:'uppercase',marginBottom:8}}>Step 3 of 4</div>
+        <h1 style={{fontSize:34,fontWeight:900,color:'#0f2b3d',letterSpacing:'-0.03em',marginBottom:6,lineHeight:1.1}}>Edit Report Content</h1>
+        <p style={{color:'#5a7184',fontSize:14}}>Review and adjust auto-filled data before generating the DOCX.</p>
+      </div>
+
+      {/* Report Metadata */}
+      <div style={{...S.card,marginBottom:16}}>
+        <div style={{display:'flex',alignItems:'center',marginBottom:14}}>
+          <div style={{fontWeight:800,fontSize:14,color:'#0f2b3d',flex:1}}>Report Information</div>
+          {!saveOpen&&<button onClick={()=>{setSaveName(`${meta.clientName||'Client'} — ${meta.reportTitle||'Report'}`);setSaveOpen(true)}} style={{...S.lb,cursor:'pointer',marginTop:0,fontSize:12,color:'#1b9aaa',fontWeight:700,border:'1px solid #b0d4e8',borderRadius:7,padding:'5px 12px',background:'#f0fafb'}}>Save Template</button>}
+          {saveOpen&&(
+            <div style={{display:'flex',gap:6,alignItems:'center'}}>
+              <input value={saveName} onChange={e=>setSaveName(e.target.value)} style={{...S.inp,padding:'5px 9px',fontSize:12,width:220}} placeholder="Template name"/>
+              <button onClick={()=>{sto.saveTemplate(saveName.trim()||'Unnamed',meta);setSaveOpen(false);setSavedToast(true);setTimeout(()=>setSavedToast(false),2000)}} style={{...S.pb,padding:'5px 12px',fontSize:12}}>Save</button>
+              <button onClick={()=>setSaveOpen(false)} style={{background:'none',border:'none',cursor:'pointer',fontSize:18,color:'#a0b4c0',lineHeight:1}}>×</button>
+            </div>
+          )}
+          {savedToast&&<span style={{fontSize:12,color:'#16a34a',fontWeight:700,marginLeft:8}}>✓ Saved</span>}
+        </div>
+        <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:'0 16px'}}>
+          <DI label="Client Name" value={meta.clientName} onChange={v=>uMeta('clientName',v)} placeholder="e.g. JICT"/>
+          <DI label="Report Period" value={meta.period} onChange={v=>uMeta('period',v)} placeholder="February 2026"/>
+          <DI label="Company" value={meta.companyName} onChange={v=>uMeta('companyName',v)}/>
+          <DI label="Report Title" value={meta.reportTitle} onChange={v=>uMeta('reportTitle',v)}/>
+          <DI label="Author Name" value={meta.authorName} onChange={v=>uMeta('authorName',v)} placeholder="Your name"/>
+          <DI label="Doc Date" type="date" value={meta.docDate} onChange={v=>uMeta('docDate',v)}/>
+          <DI label="Data Collection Date" type="date" value={meta.dataCollectionDate} onChange={v=>uMeta('dataCollectionDate',v)}/>
+          <DI label="Doc Version" value={meta.docVersion} onChange={v=>uMeta('docVersion',v)}/>
+        </div>
+        <div style={{marginTop:4}}>
+          <label style={S.lb}>Overall Condition</label>
+          <select value={meta.overallCondition} onChange={e=>uMeta('overallCondition',e.target.value)} style={S.inp}>
+            <option>good condition</option><option>fair condition</option>
+            <option>requires attention</option><option>critical condition</option>
+          </select>
+        </div>
+        <div style={{marginTop:16}}>
+          <div style={{fontWeight:700,fontSize:13,color:'#0f2b3d',marginBottom:10}}>Reviewers</div>
+          {meta.reviewers.map((r,i)=>(
+            <div key={i} style={{display:'flex',gap:8,marginBottom:8,alignItems:'flex-end'}}>
+              <DI label={i===0?"Name":""} value={r.name} onChange={v=>uRev(i,'name',v)} placeholder="Name" style={{flex:1}}/>
+              <DI label={i===0?"Position":""} value={r.position} onChange={v=>uRev(i,'position',v)} placeholder="Position" style={{flex:1}}/>
+              <DI label={i===0?"Company":""} value={r.company||""} onChange={v=>uRev(i,'company',v)} placeholder="Company" style={{flex:1}}/>
+              {meta.reviewers.length>1&&<button onClick={()=>setMeta(p=>({...p,reviewers:p.reviewers.filter((_,j)=>j!==i)}))} style={{background:'none',border:'1px solid #e2eaf0',borderRadius:8,padding:'9px 10px',cursor:'pointer',color:'#e53e3e',marginBottom:0}}>×</button>}
+            </div>
+          ))}
+          <button onClick={()=>setMeta(p=>({...p,reviewers:[...p.reviewers,{name:'',position:'',company:''}]}))} style={S.ab}>+ Add Reviewer</button>
+        </div>
+      </div>
+
+      {/* DB Tab selector (multiple DBs) */}
+      {databases.length>1&&(
+        <div style={{display:'flex',gap:8,marginBottom:14,flexWrap:'wrap'}}>
+          {databases.map(d=>(
+            <button key={d.folderName} onClick={()=>setActiveDb(d.folderName)}
+              style={{padding:'7px 16px',borderRadius:8,border:'none',cursor:'pointer',fontSize:13,fontWeight:600,
+                background:activeDb===d.folderName?'#0f4c75':'#e8f0f8',
+                color:activeDb===d.folderName?'#fff':'#0f4c75'}}>
+              {d.folderName}
+            </button>
+          ))}
+        </div>
+      )}
+
+      {db&&(
+        <div key={activeDb}>
+          {/* Executive Summary Issues */}
+          <div style={{...S.card,marginBottom:14}}>
+            <div style={{fontWeight:800,fontSize:14,color:'#0f2b3d',marginBottom:12}}>Executive Summary Issues
+              {db.flags.length>0&&<span style={{marginLeft:8,...S.tag,background:'#fff5f5',color:'#e53e3e'}}>{db.flags.length} auto-detected</span>}
+            </div>
+            {(db.exaSummaryIssues||[]).map((iss,i)=>(
+              <div key={i} style={{border:'1px solid #e2eaf0',borderRadius:8,padding:12,marginBottom:8,background:'#fafcff'}}>
+                <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:'0 12px'}}>
+                  <DI label="Section" value={iss.section} onChange={v=>uIssue(i,'section',v)} placeholder="e.g. Tablespace"/>
+                  <DI label="Impact" value={iss.impact} onChange={v=>uIssue(i,'impact',v)} placeholder="High / Medium / Low"/>
+                </div>
+                <DI label="Problem" value={iss.problem} onChange={v=>uIssue(i,'problem',v)} placeholder="Describe the issue"/>
+                <DI label="Recommendation" value={iss.recommendation} onChange={v=>uIssue(i,'recommendation',v)} placeholder="Recommended action"/>
+                {(db.exaSummaryIssues||[]).length>1&&<button onClick={()=>delIssue(i)} style={{background:'none',border:'none',color:'#e53e3e',cursor:'pointer',fontSize:12,marginTop:6}}>× Remove</button>}
+              </div>
+            ))}
+            <button onClick={addIssue} style={S.ab}>+ Add Issue</button>
+          </div>
+
+          {/* Sections */}
+          {(meta.sectionsConfig||defaultSectionsConfig).map((sc,sci)=>{
+            const sec=db.sections[sc.id]||{};
+            const key=`${db.folderName}-${sc.id}`;const isOpen=expanded[key];
+            const hasTable=sec.tableColumns?.length>0;
+            const ct=sc.contentType||'table';
+            const ctBtn=(val,label)=>(
+              <button onClick={()=>uScConf(sci,'contentType',val)} style={{padding:'4px 10px',borderRadius:6,border:'none',cursor:'pointer',fontSize:11,fontWeight:700,background:ct===val?'#0f4c75':'#e8f0f8',color:ct===val?'#fff':'#0f4c75'}}>{label}</button>
+            );
+            return(
+              <div key={sc.id} style={{...S.card,marginBottom:8,padding:0,overflow:'hidden',opacity:sc.enabled?1:0.6}}>
+                <div style={{display:'flex',alignItems:'center',gap:8,padding:'11px 16px',background:isOpen?'#f7fafc':'#fff',cursor:'pointer'}} onClick={()=>sc.enabled&&tog(key)}>
+                  {/* Enable toggle */}
+                  <button onClick={e=>{e.stopPropagation();uScConf(sci,'enabled',!sc.enabled)}} title={sc.enabled?'Disable section':'Enable section'}
+                    style={{padding:'3px 9px',borderRadius:20,border:'none',cursor:'pointer',fontSize:11,fontWeight:700,flexShrink:0,background:sc.enabled?'#d1fae5':'#f0f0f0',color:sc.enabled?'#065f46':'#888'}}>
+                    {sc.enabled?'ON':'OFF'}
+                  </button>
+                  {/* Section name (dbl-click to rename) */}
+                  {renamingId===sc.id?(
+                    <input value={renameVal} onChange={e=>setRenameVal(e.target.value)}
+                      onBlur={()=>{if(renameVal.trim())uScConf(sci,'name',renameVal.trim());setRenamingId(null)}}
+                      onKeyDown={e=>{if(e.key==='Enter'){if(renameVal.trim())uScConf(sci,'name',renameVal.trim());setRenamingId(null)}if(e.key==='Escape')setRenamingId(null)}}
+                      autoFocus onClick={e=>e.stopPropagation()}
+                      style={{...S.inp,padding:'3px 8px',fontSize:13,fontWeight:700,width:160,flex:'none'}}/>
+                  ):(
+                    <span onDoubleClick={e=>{e.stopPropagation();setRenamingId(sc.id);setRenameVal(sc.name)}}
+                      style={{fontWeight:700,fontSize:13,color:'#0f2b3d',flex:1,cursor:'text'}} title="Double-click to rename">{sc.name}</span>
+                  )}
+                  {hasTable&&<span style={{...S.tag,background:'#e8f0f8',color:'#0f4c75',fontSize:10}}>table</span>}
+                  {/* Reorder */}
+                  <button onClick={e=>{e.stopPropagation();moveSecConf(sci,-1)}} style={{background:'none',border:'none',cursor:'pointer',color:'#a0b4c0',fontSize:13,padding:'2px 4px'}} title="Move up">▲</button>
+                  <button onClick={e=>{e.stopPropagation();moveSecConf(sci,1)}} style={{background:'none',border:'none',cursor:'pointer',color:'#a0b4c0',fontSize:13,padding:'2px 4px'}} title="Move down">▼</button>
+                  {sc.isCustom&&<button onClick={e=>{e.stopPropagation();delSecConf(sci)}} style={{background:'none',border:'none',cursor:'pointer',color:'#e53e3e',fontSize:16,padding:'2px 5px'}} title="Delete section">×</button>}
+                  <span onClick={e=>{e.stopPropagation();sc.enabled&&tog(key)}} style={{color:'#a0b4c0',fontSize:11}}>{isOpen&&sc.enabled?'▲':'▼'}</span>
+                </div>
+                {isOpen&&sc.enabled&&(
+                  <div style={{padding:'4px 18px 18px'}}>
+                    {/* Content type selector */}
+                    <div style={{display:'flex',gap:6,margin:'10px 0 8px',alignItems:'center'}}>
+                      <span style={{fontSize:11,color:'#5a7184',marginRight:4}}>Content:</span>
+                      {ctBtn('table','Table')}{ctBtn('image','Image')}{ctBtn('table+image','Table+Image')}{ctBtn('none','None')}
+                    </div>
+                    {/* Table editor */}
+                    {(ct==='table'||ct==='table+image')&&sc.id!=='cpu'&&(
+                      <TableEditor columns={sec.tableColumns||[]} rows={sec.tableRows||[]} onColumnsChange={v=>uSec(sc.id,'tableColumns',v)} onRowsChange={v=>uSec(sc.id,'tableRows',v)}/>
+                    )}
+                    {/* CPU chart / image */}
+                    {sc.id==='cpu'&&(ct==='image'||ct==='table+image')&&(
+                      <div>
+                        <div style={{display:'flex',gap:8,marginBottom:10,marginTop:4}}>
+                          <button onClick={()=>uSec('cpu','inputMode','chart')} style={{padding:'6px 14px',borderRadius:7,border:'none',cursor:'pointer',fontSize:12,fontWeight:700,background:sec.inputMode==='chart'?'#0f4c75':'#e8f0f8',color:sec.inputMode==='chart'?'#fff':'#0f4c75'}}>Chart Data</button>
+                          <button onClick={()=>uSec('cpu','inputMode','image')} style={{padding:'6px 14px',borderRadius:7,border:'none',cursor:'pointer',fontSize:12,fontWeight:700,background:sec.inputMode==='image'?'#0f4c75':'#e8f0f8',color:sec.inputMode==='image'?'#fff':'#0f4c75'}}>Upload Screenshot</button>
+                        </div>
+                        {sec.inputMode==='chart'&&db.parsed.cpuUtils?.rows?.length>0&&<CpuChart columns={db.parsed.cpuUtils.columns} rows={db.parsed.cpuUtils.rows.slice(0,300)} onCanvasReady={()=>{}}/>}
+                        {sec.inputMode==='chart'&&!db.parsed.cpuUtils?.rows?.length&&<div style={{padding:'14px',background:'#fff5f5',borderRadius:8,fontSize:13,color:'#b91c1c'}}>No cpu_utils.txt data found.</div>}
+                        {sec.inputMode==='image'&&(
+                          <div style={{marginTop:4}}>
+                            <label style={{display:'inline-flex',alignItems:'center',gap:8,cursor:'pointer',padding:'9px 16px',borderRadius:8,border:'1px dashed #b0c4d0',fontSize:13,color:'#1b9aaa',fontWeight:600,background:'#f7fafc'}}>
+                              🖼 Upload Chart Screenshot
+                              <input type="file" accept="image/png,image/jpeg" style={{display:'none'}} onChange={e=>{const file=e.target.files[0];if(!file)return;const reader=new FileReader();reader.onload=ev=>{const bytes=new Uint8Array(ev.target.result);const type=file.type==='image/png'?'png':'jpg';uSec('cpu','chartImage',{data:bytes,type,name:file.name})};reader.readAsArrayBuffer(file);}}/>
+                            </label>
+                            {sec.chartImage&&<div style={{marginTop:8,fontSize:12,color:'#16a34a',fontWeight:600}}>✓ {sec.chartImage.name} selected</div>}
+                          </div>
+                        )}
+                      </div>
+                    )}
+                    {/* Screenshot upload for non-cpu image sections */}
+                    {sc.id!=='cpu'&&(ct==='image'||ct==='table+image')&&(
+                      <div style={{marginTop:8}}>
+                        <label style={{display:'inline-flex',alignItems:'center',gap:8,cursor:'pointer',padding:'8px 14px',borderRadius:8,border:'1px dashed #b0c4d0',fontSize:12,color:'#1b9aaa',fontWeight:600,background:'#f7fafc'}}>
+                          🖼 Add Screenshot(s)
+                          <input type="file" accept="image/png,image/jpeg" multiple style={{display:'none'}} onChange={e=>handleScreenshotUpload(sc.id,e)}/>
+                        </label>
+                        {(sec.screenshots||[]).length>0&&(
+                          <div style={{display:'flex',gap:8,flexWrap:'wrap',marginTop:8}}>
+                            {(sec.screenshots||[]).map((ss,si)=>(
+                              <div key={si} style={{position:'relative',display:'inline-flex',alignItems:'center',gap:4,padding:'4px 10px',background:'#f0fafb',borderRadius:6,fontSize:11,border:'1px solid #b0d4e8'}}>
+                                <span>{ss.name||`screenshot_${si+1}`}</span>
+                                <button onClick={()=>removeScreenshot(sc.id,si)} style={{background:'none',border:'none',cursor:'pointer',color:'#e53e3e',fontSize:14,padding:0,lineHeight:1}}>×</button>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    )}
+                    <DTA label="Recommendation" value={sec.recommendation||sc.defaultRec} onChange={v=>uSec(sc.id,'recommendation',v)}/>
+                  </div>
+                )}
+              </div>
+            );
+          })}
+          {/* Add custom section */}
+          <div style={{display:'flex',gap:8,marginTop:12,alignItems:'center'}}>
+            <input value={newSecName} onChange={e=>setNewSecName(e.target.value)} placeholder="New section name..."
+              style={{...S.inp,padding:'8px 12px',fontSize:13}} onKeyDown={e=>e.key==='Enter'&&addCustomSec()}/>
+            <button onClick={addCustomSec} disabled={!newSecName.trim()} style={{...S.ab,marginTop:0,opacity:newSecName.trim()?1:0.5}}>+ Add Section</button>
+          </div>
+        </div>
+      )}
+
+      <div style={{marginTop:28,display:'flex',justifyContent:'flex-end'}}>
+        <button onClick={onNext} style={{...S.pb,padding:'13px 30px',fontSize:14}}>Preview & Generate →</button>
+      </div>
+    </div>
+  );
+}
+
+// ─── STEP 3: GENERATE ────────────────────────────────────────────────────────
+function StepGenerate({databases,meta,logoData,clientLogoData}){
+  const[mode,setMode]=useState('separate');
+  const[gen,setGen]=useState(false);
+  const[toast,setToast]=useState(null);
+  const totalFlags=databases.reduce((s,db)=>s+db.flags.length,0);
+
+  const buildPayload=(opts)=>{
+    const{mode:m,db,dbs,dbsData}=opts;
+    const reportData=buildReportData(db||databases[0],meta);
+    return{
+      meta:{clientName:meta.clientName,companyName:meta.companyName,
+        reportTitle:meta.reportTitle,reviewers:meta.reviewers||[],
+        databaseName:(db||databases[0])?.folderName||''},
+      mode:m,
+      db:db?{databaseName:db.folderName,serverType:db.parsed?.hostname?.osName||''}:undefined,
+      dbs:(dbs||[]).map(d=>({databaseName:d.folderName,serverType:d.parsed?.hostname?.osName||''})),
+      serverInfo:(db||databases[0])?.parsed?.serverInfo||{},
+      databaseInfo:(db||databases[0])?.parsed?.databaseInfo||{},
+      reportData:{
+        ...reportData,
+        sections:reportData.sections.map(sec=>({
+          ...sec,
+          cpuData:(db||databases[0])?.parsed?.cpuUtils||{},
+        })),
+      },
+      dbsData:(dbsData||[]).map(d=>{
+        const rd=buildReportData(d,meta);
+        return{...rd,databaseName:d.folderName,sections:rd.sections.map(s=>({...s,cpuData:d.parsed?.cpuUtils||{}}))};
+      }),
+      logoData:logoData?`data:image/${logoData.type};base64,${uint8ToB64(logoData.data)}`:null,
+      clientLogoData:clientLogoData?`data:image/${clientLogoData.type};base64,${uint8ToB64(clientLogoData.data)}`:null,
+    };
+  };
+
+  const downloadOne=async(payload)=>{
+    const res=await fetch('http://localhost:8000/generate',{
+      method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify(payload),
+    });
+    if(!res.ok){const txt=await res.text();throw new Error(txt);}
+    const blob=await res.blob();
+    const url=URL.createObjectURL(blob);
+    const a=document.createElement('a');
+    const cd=res.headers.get('Content-Disposition')||'';
+    a.download=cd.match(/filename="(.+)"/)?.[1]||'report.docx';
+    a.href=url;a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const handleGenerate=async()=>{
+    setGen(true);setToast(null);
+    try{
+      if(mode==='combined'){
+        await downloadOne(buildPayload({mode:'combined',db:databases[0],dbs:databases,dbsData:databases}));
+        setToast('✓ Combined report downloaded!');
+      }else if(databases.length===1){
+        await downloadOne(buildPayload({mode:'single',db:databases[0]}));
+        setToast('✓ Report downloaded!');
+      }else{
+        for(let i=0;i<databases.length;i++){
+          await downloadOne(buildPayload({mode:'separate',db:databases[i]}));
+          if(i<databases.length-1)await new Promise(r=>setTimeout(r,380));
+        }
+        setToast(`✓ ${databases.length} reports downloaded!`);
+      }
+    }catch(e){console.error(e);setToast('Error: '+e.message);}
+    finally{setGen(false);}
+  };
+
+  const modeOpts=[
+    {val:'separate',label:'Separate Reports',desc:`One .docx per database (${databases.length} file${databases.length!==1?'s':''})`},
+    {val:'combined',label:'Combined Report',desc:'All databases in one .docx'},
+  ];
+
+  return(
+    <div style={{maxWidth:560,margin:'0 auto'}}>
+      <div style={{marginBottom:28,animation:'fadeUp 0.4s ease both'}}>
+        <div style={{fontSize:13,fontWeight:700,color:'#1b9aaa',letterSpacing:'0.06em',textTransform:'uppercase',marginBottom:8}}>Step 4 of 4</div>
+        <h1 style={{fontSize:34,fontWeight:900,color:'#0f2b3d',letterSpacing:'-0.03em',marginBottom:6,lineHeight:1.1}}>Generate Report</h1>
+        <p style={{color:'#5a7184',fontSize:14}}>Review the summary below then click generate to download.</p>
+      </div>
+
+      {/* Summary Card */}
+      <div style={{...S.card,marginBottom:16}}>
+        <div style={{fontWeight:800,fontSize:14,color:'#0f2b3d',marginBottom:14}}>Summary</div>
+        <div style={{display:'flex',flexDirection:'column',gap:8}}>
+          <div style={{display:'flex',gap:10,fontSize:13}}><span style={{color:'#16a34a',fontWeight:700}}>✓</span><span>{databases.length} database{databases.length!==1?'s':''} ready</span></div>
+          {meta.clientName&&<div style={{display:'flex',gap:10,fontSize:13}}><span style={{color:'#16a34a',fontWeight:700}}>✓</span><span>Client: <strong>{meta.clientName}</strong></span></div>}
+          {meta.period&&<div style={{display:'flex',gap:10,fontSize:13}}><span style={{color:'#16a34a',fontWeight:700}}>✓</span><span>Period: <strong>{meta.period}</strong></span></div>}
+          {meta.authorName&&<div style={{display:'flex',gap:10,fontSize:13}}><span style={{color:'#16a34a',fontWeight:700}}>✓</span><span>Author: <strong>{meta.authorName}</strong></span></div>}
+          {!meta.clientName&&<div style={{display:'flex',gap:10,fontSize:13}}><span style={{color:'#d97706',fontWeight:700}}>⚠</span><span style={{color:'#92400e'}}>Client name not set (edit in Step 3)</span></div>}
+          {totalFlags>0&&<div style={{display:'flex',gap:10,fontSize:13}}><span style={{color:'#e53e3e',fontWeight:700}}>⚠</span><span>{totalFlags} issue{totalFlags!==1?'s':''} will appear in Executive Summary</span></div>}
+        </div>
+      </div>
+
+      {/* Mode Selector */}
+      <div style={{...S.card,marginBottom:20}}>
+        <div style={{fontWeight:800,fontSize:14,color:'#0f2b3d',marginBottom:14}}>Report Mode</div>
+        <div style={{display:'flex',flexDirection:'column',gap:10}}>
+          {modeOpts.map(opt=>(
+            <label key={opt.val} style={{display:'flex',gap:12,cursor:'pointer',padding:'12px 14px',borderRadius:9,border:`1px solid ${mode===opt.val?'#1b9aaa':'#e2eaf0'}`,background:mode===opt.val?'#f0fafb':'#fff',transition:'all 0.15s'}}>
+              <input type="radio" value={opt.val} checked={mode===opt.val} onChange={()=>setMode(opt.val)} style={{accentColor:'#1b9aaa',marginTop:2,flexShrink:0}}/>
+              <div><div style={{fontWeight:700,fontSize:13,color:'#0f2b3d'}}>{opt.label}</div><div style={{fontSize:12,color:'#7a8f9e',marginTop:2}}>{opt.desc}</div></div>
+            </label>
+          ))}
+        </div>
+      </div>
+
+      {toast&&(
+        <div style={{background:toast.startsWith('Error')?'#fff5f5':'#f0fdf4',border:`1px solid ${toast.startsWith('Error')?'#fca5a5':'#bbf7d0'}`,borderRadius:10,padding:'13px 16px',marginBottom:16,color:toast.startsWith('Error')?'#b91c1c':'#166534',fontWeight:600,fontSize:13}}>
+          {toast}
+        </div>
+      )}
+
+      <button onClick={handleGenerate} disabled={gen}
+        style={{...S.pb,width:'100%',justifyContent:'center',fontSize:15,padding:'16px 24px',borderRadius:12,opacity:gen?0.7:1}}>
+        {gen?'Generating...':`📄 Download ${mode==='combined'?'Combined Report':databases.length+' Report'+(databases.length!==1&&mode!=='combined'?'s':'')}`}
+      </button>
+    </div>
+  );
+}
+
+// ─── SIDEBAR ─────────────────────────────────────────────────────────────────
+function Sidebar({step,setStep,databases,meta}){
+  const totalFlags=databases.reduce((s,db)=>s+db.flags.length,0);
+  const STEPS=['Load Data','Review','Edit','Generate'];
+  return(
+    <div style={{width:240,minWidth:240,background:'#0d1b2a',display:'flex',flexDirection:'column',padding:'24px 0',height:'100vh',position:'sticky',top:0,flexShrink:0}}>
+      {/* Logo */}
+      <div style={{padding:'0 20px 22px',borderBottom:'1px solid #1a2f42'}}>
+        <div style={{display:'flex',alignItems:'center',gap:10}}>
+          <div style={{width:34,height:34,background:'linear-gradient(135deg,#0f4c75,#1b9aaa)',borderRadius:9,display:'flex',alignItems:'center',justifyContent:'center',fontSize:16,flexShrink:0}}>⚡</div>
+          <div>
+            <div style={{color:'#fff',fontWeight:900,fontSize:13,letterSpacing:'-0.01em'}}>Report Automation</div>
+            <div style={{color:'#3d5a70',fontSize:10,marginTop:1}}>Oracle DB Health Check</div>
+          </div>
+        </div>
+      </div>
+      {/* Steps */}
+      <div style={{padding:'16px 0',flex:1}}>
+        {STEPS.map((label,i)=>{
+          const isActive=step===i;const isDone=step>i;
+          const isLocked=i>0&&databases.length===0&&i>step;
+          return(
+            <button key={i} onClick={()=>{if(!isLocked)setStep(i)}}
+              style={{display:'flex',alignItems:'center',gap:11,width:'100%',padding:'11px 20px',
+                background:isActive?'rgba(27,154,170,0.1)':'transparent',border:'none',
+                borderLeft:isActive?'3px solid #1b9aaa':'3px solid transparent',
+                cursor:isLocked?'default':'pointer',opacity:isLocked?0.3:1,transition:'all 0.15s'}}>
+              <div style={{width:24,height:24,borderRadius:'50%',display:'flex',alignItems:'center',justifyContent:'center',flexShrink:0,
+                background:isDone?'#1b9aaa':isActive?'rgba(27,154,170,0.18)':'rgba(255,255,255,0.05)',
+                fontSize:11,fontWeight:800,color:isDone?'#fff':isActive?'#1b9aaa':'#3d5a70'}}>
+                {isDone?'✓':i+1}
+              </div>
+              <span style={{fontSize:13,fontWeight:600,color:isActive?'#fff':isDone?'#6ec5d0':'#3d5a70'}}>{label}</span>
+            </button>
+          );
+        })}
+      </div>
+      {/* Session info */}
+      {databases.length>0&&(
+        <div style={{padding:'16px 20px',borderTop:'1px solid #1a2f42'}}>
+          <div style={{fontSize:10,fontWeight:700,color:'#2d4a5e',letterSpacing:'0.08em',marginBottom:8,textTransform:'uppercase'}}>Session</div>
+          <div style={{fontSize:13,color:'#e2eaf0',marginBottom:3}}>{databases.length} database{databases.length!==1?'s':''} loaded</div>
+          <div style={{fontSize:13,fontWeight:700,color:totalFlags>0?'#f87171':'#4ade80',marginBottom:3}}>
+            {totalFlags>0?`${totalFlags} flag${totalFlags!==1?'s':''} detected`:'✓ No issues'}
+          </div>
+          {meta.clientName&&<div style={{fontSize:11,color:'#2d4a5e',marginTop:2}}>{meta.clientName}</div>}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── APP ROOT ────────────────────────────────────────────────────────────────
+function App(){
+  const[step,setStep]=useState(0);
+  const[databases,setDatabases]=useState([]);
+  const[logoData,setLogoData]=useState(null);
+  const[clientLogoData,setClientLogoData]=useState(null);
+  const[backendStatus,setBackendStatus]=useState('checking');
+  const[meta,setMeta]=useState({
+    clientName:'',companyName:'PT. Sisindokom Lintasbuana',
+    reportTitle:'Preventive Maintenance',
+    period:new Date().toLocaleDateString('en-US',{month:'long',year:'numeric'}),
+    authorName:'',docVersion:'1.0',
+    docDate:new Date().toISOString().split('T')[0],
+    dataCollectionDate:new Date().toISOString().split('T')[0],
+    overallCondition:'good condition',summaryText:'',
+    reviewers:[{name:'',position:'',company:''}],
+    sectionsConfig:[...defaultSectionsConfig],
+  });
+  useEffect(()=>{
+    fetch('http://localhost:8000/health')
+      .then(r=>r.ok?r.json():Promise.reject())
+      .then(()=>setBackendStatus('ok'))
+      .catch(()=>setBackendStatus('offline'));
+  },[]);
+  const handleLoad=useCallback(dbs=>{setDatabases(dbs);setStep(1)},[]);
+  return(
+    <div style={{display:'flex',width:'100%',height:'100vh',fontFamily:"'Inter',sans-serif"}}>
+      <Sidebar step={step} setStep={setStep} databases={databases} meta={meta}/>
+      <div style={{flex:1,overflowY:'auto',background:'#f7fafc',padding:'44px 48px',minWidth:0}}>
+        {step===0&&<StepLoad onLoad={handleLoad} logoData={logoData} setLogoData={setLogoData} clientLogoData={clientLogoData} setClientLogoData={setClientLogoData} backendStatus={backendStatus} setMeta={setMeta}/>}
+        {step===1&&<StepReview databases={databases} onNext={()=>setStep(2)}/>}
+        {step===2&&<StepEdit databases={databases} meta={meta} setMeta={setMeta} setDatabases={setDatabases} onNext={()=>setStep(3)}/>}
+        {step===3&&<StepGenerate databases={databases} meta={meta} logoData={logoData} clientLogoData={clientLogoData}/>}
+      </div>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
+</script>
+</body>
+</html>

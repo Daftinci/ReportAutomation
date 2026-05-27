@@ -1,0 +1,1 @@
+Linux exakai04db01 5.15.0-308.179.6.16.el8uek.x86_64 #2 SMP Thu Sep 18 11:19:34 PDT 2025 x86_64 x86_64 x86_64 GNU/Linux

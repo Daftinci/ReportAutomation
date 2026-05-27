@@ -1,0 +1,42 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+.env
+.venv/
+venv/
+env/
+
+# Virtual environments
+Backend/reportgen/
+
+# Temp uploads and generated outputs
+Backend/temp_uploads/
+Backend/output.xlsx
+Backend/test_header.docx
+Backend/test_output.docx
+
+# Node
+Frontend/Report_Automation/node_modules/
+Frontend/Report_Automation/dist/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Claude local config
+.claude/
+
+# Database Data — exclude all client folders except one sample
+Database Data/*
+!Database Data/KAI
+Database Data/KAI/*
+!Database Data/KAI/exakai04db01
+Database Data/KAI/exakai04db01/*
+!Database Data/KAI/exakai04db01/MBSHIP1

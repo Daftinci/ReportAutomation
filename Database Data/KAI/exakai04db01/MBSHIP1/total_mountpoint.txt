@@ -1,0 +1,25 @@
+Filesystem                                                Size  Used Avail Use% Mounted on
+devtmpfs                                                  586G     0  586G   0% /dev
+tmpfs                                                     1.2T  7.5G  1.2T   1% /dev/shm
+tmpfs                                                     586G   12M  586G   1% /run
+tmpfs                                                     586G     0  586G   0% /sys/fs/cgroup
+/dev/mapper/VGExaDb-LVDbSys1                               20G  9.2G   11G  46% /
+/dev/mapper/VGExaDbDisk.u01.20.img-LVDBDisk                20G  7.6G   13G  38% /u01
+/dev/mapper/VGExaDb-LVDbVar1                              5.0G  2.6G  2.5G  52% /var
+/dev/mapper/VGExaDb-LVDbKdump                              20G   33M   20G   1% /crashfiles
+/dev/mapper/VGExaDbDisk.u02_extra.img-LVDBDisk            294G  135G  146G  48% /u02
+/dev/mapper/VGExaDb-LVDbHome                              4.0G  2.8G  1.3G  69% /home
+/dev/mapper/VGExaDb-LVDbVarLog                             18G  3.1G   15G  18% /var/log
+/dev/mapper/VGExaDbDisk.grid19.0.0.0.220419.img-LVDBDisk   50G   12G   39G  24% /u01/app/19.0.0.0/grid
+/dev/mapper/VGExaDb-LVDbTmp                               3.0G  169M  2.9G   6% /tmp
+/dev/mapper/VGExaDb-LVDbVarLogAudit                       3.0G  149M  2.9G   5% /var/log/audit
+/dev/sdb1                                                 509M  163M  347M  32% /boot
+172.16.9.143:/backup-dba                                   90T   32T   59T  35% /backupdba
+172.16.13.2:/backup_exadata                                15T   10T  5.1T  67% /backupexa
+172.19.8.181:/mnt/pooldcbb/backup-db                       29T  6.5T   23T  23% /backupnfs
+tmpfs                                                     118G     0  118G   0% /run/user/0
+tmpfs                                                     118G     0  118G   0% /run/user/2000
+/dev/asm/acfsvol01-345                                    150G  105G   46G  70% /acfs01
+tmpfs                                                     118G     0  118G   0% /run/user/1001
+tmpfs                                                     118G     0  118G   0% /run/user/1000
+total                                                     138T   48T   90T  35% -

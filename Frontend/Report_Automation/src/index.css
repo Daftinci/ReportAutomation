@@ -1,0 +1,12 @@
+@import "tailwindcss";
+
+html, body, #root { height: 100%; }
+body {
+  font-family: 'Plus Jakarta Sans', system-ui, -apple-system, sans-serif;
+  color: #0f172a;
+  background: #eef0fb;
+  -webkit-font-smoothing: antialiased;
+}
+*::-webkit-scrollbar { width: 8px; height: 8px; }
+*::-webkit-scrollbar-thumb { background: rgba(15,23,42,0.12); border-radius: 8px; }
+*::-webkit-scrollbar-track { background: transparent; }

@@ -1,0 +1,10 @@
+   Static hostname: exakai04db01
+         Icon name: computer-vm
+           Chassis: vm
+        Machine ID: cfb6d8439ec94da9ac8afe9441c81bf8
+           Boot ID: de99acccea6842528ce4919a812a8806
+    Virtualization: kvm
+  Operating System: Oracle Linux Server 8.10
+       CPE OS Name: cpe:/o:oracle:linux:8:10:server
+            Kernel: Linux 5.15.0-308.179.6.16.el8uek.x86_64
+      Architecture: x86-64

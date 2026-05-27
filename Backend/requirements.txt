@@ -1,0 +1,15 @@
+# Install into the "Automation" conda env:
+#   conda activate Automation
+#   pip install -r requirements.txt
+
+fastapi
+uvicorn[standard]
+beautifulsoup4
+lxml
+python-docx
+matplotlib
+Pillow
+asyncpg
+python-jose[cryptography]
+bcrypt
+python-multipart

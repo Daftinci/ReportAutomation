@@ -1,0 +1,9 @@
+
+Disk Group
+Name                      State       Total Size (GB) Free Size (GB)  % Free
+------------------------- ----------- --------------- -------------- -------
+DATAC1                    CONNECTED           122,880         43,941   35.76
+RECOC1                    CONNECTED            30,720          9,530   31.02
+                                      ---------------
+Grand Total:                                  153,600
+

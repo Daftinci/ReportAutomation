@@ -1,0 +1,34 @@
+--------------------------------------------------------------------------------
+Name           Target  State        Server                   State details       
+--------------------------------------------------------------------------------
+Cluster Resources
+--------------------------------------------------------------------------------
+ora.asm
+      1        ONLINE  ONLINE       exakai04db01             Started,STABLE
+ora.crf
+      1        ONLINE  ONLINE       exakai04db01             STABLE
+ora.crsd
+      1        ONLINE  ONLINE       exakai04db01             STABLE
+ora.cssd
+      1        ONLINE  ONLINE       exakai04db01             STABLE
+ora.cssdmonitor
+      1        ONLINE  ONLINE       exakai04db01             STABLE
+ora.ctssd
+      1        ONLINE  ONLINE       exakai04db01             OBSERVER,STABLE
+ora.diskmon
+      1        ONLINE  ONLINE       exakai04db01             STABLE
+ora.drivers.acfs
+      1        ONLINE  ONLINE       exakai04db01             STABLE
+ora.drivers.oka
+      1        OFFLINE OFFLINE                               STABLE
+ora.evmd
+      1        ONLINE  ONLINE       exakai04db01             STABLE
+ora.gipcd
+      1        ONLINE  ONLINE       exakai04db01             STABLE
+ora.gpnpd
+      1        ONLINE  ONLINE       exakai04db01             STABLE
+ora.mdnsd
+      1        ONLINE  ONLINE       exakai04db01             STABLE
+ora.storage
+      1        ONLINE  ONLINE       exakai04db01             STABLE
+--------------------------------------------------------------------------------
