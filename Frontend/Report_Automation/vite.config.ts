@@ -11,13 +11,15 @@ export default defineConfig({
     babel({ presets: [reactCompilerPreset()] }),
   ],
   server: {
+    host: '0.0.0.0',
+    allowedHosts: ['sisreport.local'],
     proxy: {
-      '/auth':     { target: 'http://localhost:8000', changeOrigin: true },
-      '/upload':   { target: 'http://localhost:8000', changeOrigin: true },
-      '/jobs':     { target: 'http://localhost:8000', changeOrigin: true },
-      '/reports':  { target: 'http://localhost:8000', changeOrigin: true },
-      '/generate': { target: 'http://localhost:8000', changeOrigin: true },
-      '/health':   { target: 'http://localhost:8000', changeOrigin: true },
+      '/auth':     { target: process.env.VITE_API_URL ?? 'http://localhost:8000', changeOrigin: true },
+      '/upload':   { target: process.env.VITE_API_URL ?? 'http://localhost:8000', changeOrigin: true },
+      '/jobs':     { target: process.env.VITE_API_URL ?? 'http://localhost:8000', changeOrigin: true },
+      '/reports':  { target: process.env.VITE_API_URL ?? 'http://localhost:8000', changeOrigin: true },
+      '/generate': { target: process.env.VITE_API_URL ?? 'http://localhost:8000', changeOrigin: true },
+      '/health':   { target: process.env.VITE_API_URL ?? 'http://localhost:8000', changeOrigin: true },
     },
   },
 })
