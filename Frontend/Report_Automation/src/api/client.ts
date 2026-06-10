@@ -294,6 +294,41 @@ export async function generateCombined(extractionIds: string[], opts: GenerateOp
   URL.revokeObjectURL(url);
 }
 
+// ─── User management (admin only) ────────────────────────────────────────────
+
+export interface User {
+  id: string;
+  username: string;
+  role: 'admin' | 'standard';
+  created_at: string;
+}
+
+export async function listUsers(): Promise<User[]> {
+  return apiJson<User[]>('/users');
+}
+
+export async function createUser(username: string, password: string, role: 'admin' | 'standard'): Promise<User> {
+  return apiJson<User>('/users', {
+    method: 'POST',
+    body: JSON.stringify({ username, password, role }),
+  });
+}
+
+export async function updateUser(id: string, updates: { role?: string; password?: string }): Promise<void> {
+  await apiJson<{ ok: boolean }>(`/users/${id}`, {
+    method: 'PATCH',
+    body: JSON.stringify(updates),
+  });
+}
+
+export async function deleteUser(id: string): Promise<void> {
+  const res = await apiFetch(`/users/${id}`, { method: 'DELETE' });
+  if (!res.ok && res.status !== 204) {
+    const text = await res.text();
+    throw new Error(text || `Delete failed (HTTP ${res.status})`);
+  }
+}
+
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 export function formatRelativeTime(isoString: string): string {

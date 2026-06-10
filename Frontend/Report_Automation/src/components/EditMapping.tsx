@@ -573,7 +573,13 @@ export default function EditMappingModal({ open, upload, accent, onClose, client
 
   useEffect(() => {
     if (!open || !upload?.id) return;
-    const hasLocal = !!localStorage.getItem(`sections_${upload.id}`);
+    const stored = localStorage.getItem(`sections_${upload.id}`);
+    const hasLocal = !!stored;
+    if (stored) {
+      try { setSectionData(JSON.parse(stored)); } catch { setSectionData(upload?.sections ?? {}); }
+    } else {
+      setSectionData(upload?.sections ?? {});
+    }
     setLoading(true);
     api.getReport(upload.id)
       .then((detail) => {

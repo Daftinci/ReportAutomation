@@ -29,6 +29,7 @@ interface Props {
   onCreateGroup: (name: string, clientName: string) => void;
   onDeleteGroup: (id: string) => void;
   onRenameGroup: (id: string, name: string) => void;
+  isAdmin?: boolean;
 }
 
 function ChevronIcon({ open }: { open: boolean }) {
@@ -78,6 +79,17 @@ function TrashIcon() {
   );
 }
 
+function UsersIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+      <circle cx="5.5" cy="4.5" r="2" stroke="currentColor" strokeWidth="1.3" />
+      <path d="M1 12c0-2 2-3.5 4.5-3.5S10 10 10 12" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
+      <path d="M10.5 5.5c1 0 2 .8 2 2.5" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
+      <path d="M10.5 3.5a1.5 1.5 0 1 1 0 3" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
+    </svg>
+  );
+}
+
 function HelpIcon() {
   return (
     <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
@@ -100,7 +112,7 @@ function UploadNavIcon() {
 
 export default function Sidebar({
   clients, uploads, trashedCount, filter, setFilter, accent, page, setPage,
-  groups, onCreateGroup, onDeleteGroup, onRenameGroup,
+  groups, onCreateGroup, onDeleteGroup, onRenameGroup, isAdmin,
 }: Props) {
   const [openClients, setOpenClients] = useState<Record<string, boolean>>({});
   const [openGroups, setOpenGroups] = useState<Record<string, boolean>>({});
@@ -431,6 +443,19 @@ export default function Sidebar({
                 </span>
               )}
             </button>
+            {isAdmin && (
+              <button
+                onClick={() => setPage('users')}
+                className={
+                  pillBase + ' px-3 py-2 text-[13.5px] ' +
+                  (page === 'users' ? 'text-white font-medium' : 'text-slate-600 hover:bg-slate-50')
+                }
+                style={page === 'users' ? { background: accent } : undefined}
+              >
+                <UsersIcon />
+                <span className="flex-1">User management</span>
+              </button>
+            )}
           </div>
         </div>
       </div>

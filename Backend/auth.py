@@ -25,10 +25,10 @@ def hash_password(plain: str) -> str:
     return bcrypt.hashpw(plain.encode(), bcrypt.gensalt()).decode()
 
 
-def create_access_token(username: str) -> str:
+def create_access_token(username: str, role: str = 'standard', user_id: str = '') -> str:
     expire = datetime.now(timezone.utc) + timedelta(hours=TOKEN_EXPIRE_HOURS)
     return jwt.encode(
-        {"sub": username, "exp": expire},
+        {"sub": username, "role": role, "uid": user_id, "exp": expire},
         SECRET_KEY,
         algorithm=ALGORITHM,
     )
@@ -51,4 +51,13 @@ async def get_current_user(token: str = Depends(oauth2_scheme)) -> dict:
     user = await db.get_user_by_username(username)
     if not user:
         raise credentials_exc
+    return user
+
+
+async def require_admin(user: dict = Depends(get_current_user)) -> dict:
+    if user.get("role") != "admin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Admin access required",
+        )
     return user

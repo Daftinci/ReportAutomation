@@ -6,6 +6,7 @@ import ExtractedDataPreview from './components/ExtractedDataPreview';
 import UploadPage, { type Upload } from './components/Upload';
 import TrashPage from './components/TrashPage';
 import EditMappingModal from './components/EditMapping';
+import UsersPage from './components/UsersPage';
 import * as api from './api/client';
 
 const ACCENT = '#5538ee';
@@ -137,10 +138,10 @@ function LoginPage({ onLogin }: { onLogin: () => void }) {
 
 // ─── Top bar ──────────────────────────────────────────────────────────────────
 
-function TopBar({ page, setPage, sidebarOpen, onToggleSidebar, username, onLogout }: {
+function TopBar({ page, setPage, sidebarOpen, onToggleSidebar, username, isAdmin, onLogout }: {
   page: string; setPage: (p: string) => void;
   sidebarOpen: boolean; onToggleSidebar: () => void;
-  username: string; onLogout: () => void;
+  username: string; isAdmin: boolean; onLogout: () => void;
 }) {
   const NavBtn = ({ id, children }: { id: string; children: React.ReactNode }) => (
     <button
@@ -196,6 +197,11 @@ function TopBar({ page, setPage, sidebarOpen, onToggleSidebar, username, onLogou
 
       <div className="ml-auto flex items-center gap-3">
         <span className="text-[12px] text-white/50">{username}</span>
+        {isAdmin && (
+          <span className="text-[10px] font-semibold uppercase tracking-wider px-1.5 py-0.5 rounded bg-white/15 text-white/70">
+            Admin
+          </span>
+        )}
         <button
           onClick={onLogout}
           className="h-8 px-3 rounded-md text-[12px] text-white/60 hover:text-white hover:bg-white/10 transition-colors"
@@ -213,6 +219,8 @@ function TopBar({ page, setPage, sidebarOpen, onToggleSidebar, username, onLogou
 export default function App() {
   const [token, setToken] = useState<string | null>(() => api.getToken());
   const [username, setUsername] = useState('');
+  const [currentUserId, setCurrentUserId] = useState('');
+  const [isAdmin, setIsAdmin] = useState(false);
 
   const [uploads, setUploads] = useState<Upload[]>([]);
   const [trashedUploads, setTrashedUploads] = useState<Upload[]>([]);
@@ -254,7 +262,7 @@ export default function App() {
 
   // Listen for 401 logout events from the API client
   useEffect(() => {
-    const handler = () => { setToken(null); setUsername(''); setUploads([]); };
+    const handler = () => { setToken(null); setUsername(''); setCurrentUserId(''); setIsAdmin(false); setUploads([]); };
     window.addEventListener('ra:logout', handler);
     return () => window.removeEventListener('ra:logout', handler);
   }, []);
@@ -288,8 +296,12 @@ export default function App() {
       try {
         const payload = JSON.parse(atob(token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/')));
         setUsername(payload.sub || '');
+        setIsAdmin(payload.role === 'admin');
+        setCurrentUserId(payload.uid || '');
       } catch {
         setUsername('');
+        setIsAdmin(false);
+        setCurrentUserId('');
       }
       loadReports();
     }
@@ -309,6 +321,8 @@ export default function App() {
     api.clearToken();
     setToken(null);
     setUsername('');
+    setCurrentUserId('');
+    setIsAdmin(false);
     setUploads([]);
   };
 
@@ -389,6 +403,7 @@ export default function App() {
         sidebarOpen={sidebarOpen}
         onToggleSidebar={() => setSidebarOpen((v) => !v)}
         username={username}
+        isAdmin={isAdmin}
         onLogout={handleLogout}
       />
 
@@ -407,6 +422,7 @@ export default function App() {
             onCreateGroup={handleCreateGroup}
             onDeleteGroup={handleDeleteGroup}
             onRenameGroup={handleRenameGroup}
+            isAdmin={isAdmin}
           />
         </div>
 
@@ -455,6 +471,10 @@ export default function App() {
             onEmptyTrash={handleEmptyTrash}
             accent={ACCENT}
           />
+        )}
+
+        {page === 'users' && isAdmin && (
+          <UsersPage currentUserId={currentUserId} />
         )}
       </div>
 

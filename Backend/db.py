@@ -46,6 +46,7 @@ async def _create_tables() -> None:
                 id           TEXT PRIMARY KEY,
                 username     TEXT UNIQUE NOT NULL,
                 password_hash TEXT NOT NULL,
+                role         TEXT NOT NULL DEFAULT 'standard',
                 created_at   TIMESTAMPTZ DEFAULT NOW()
             );
 
@@ -82,18 +83,54 @@ async def _create_tables() -> None:
             CREATE INDEX IF NOT EXISTS idx_ext_database
                 ON extractions (database_name);
         """)
+        # Migrate existing tables that predate the role column
+        await conn.execute(
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS role TEXT NOT NULL DEFAULT 'standard'"
+        )
 
 
 # ─── USER ─────────────────────────────────────────────────────────────────────
 
-async def create_user(username: str, password_hash: str) -> str:
+async def create_user(username: str, password_hash: str, role: str = 'standard') -> str:
     uid = str(uuid4())
     async with pool.acquire() as conn:
         await conn.execute(
-            "INSERT INTO users (id, username, password_hash) VALUES ($1, $2, $3)",
-            uid, username, password_hash,
+            "INSERT INTO users (id, username, password_hash, role) VALUES ($1, $2, $3, $4)",
+            uid, username, password_hash, role,
         )
     return uid
+
+
+async def list_users() -> list[dict]:
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT id, username, role, created_at FROM users ORDER BY created_at"
+        )
+    return [dict(r) for r in rows]
+
+
+async def update_user(user_id: str, **kwargs: Any) -> bool:
+    allowed = {k: v for k, v in kwargs.items() if k in ('role', 'password_hash')}
+    if not allowed:
+        return False
+    parts = []
+    vals: list = []
+    for i, (k, v) in enumerate(allowed.items(), start=1):
+        parts.append(f"{k} = ${i}")
+        vals.append(v)
+    vals.append(user_id)
+    async with pool.acquire() as conn:
+        result = await conn.execute(
+            f"UPDATE users SET {', '.join(parts)} WHERE id = ${len(vals)}",
+            *vals,
+        )
+    return result == "UPDATE 1"
+
+
+async def delete_user(user_id: str) -> bool:
+    async with pool.acquire() as conn:
+        result = await conn.execute("DELETE FROM users WHERE id = $1", user_id)
+    return result == "DELETE 1"
 
 
 async def get_user_by_username(username: str) -> Optional[dict]:

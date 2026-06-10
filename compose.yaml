@@ -36,7 +36,7 @@ services:
     ports:
       - "8000:8000"
     environment:
-      - DATABASE_URL=postgresql://postgres:postgres@database:5432/reportgen
+      - DATABASE_URL=postgresql://postgres:postgres@database:5432/reportgen?sslmode=disable
       - SECRET_KEY=change-this-in-prod
       - ADMIN_USERNAME=admin
       - ADMIN_PASSWORD=admin

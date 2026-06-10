@@ -68,15 +68,21 @@ app.add_middleware(
 
 
 async def _ensure_admin_user() -> None:
-    """Create default admin from env vars on first startup."""
+    """Create or promote the configured admin user on every startup."""
     admin_user = os.environ.get("ADMIN_USERNAME", "admin")
     admin_pass = os.environ.get("ADMIN_PASSWORD", "")
     if not admin_pass:
         return
-    if await db.count_users() == 0:
-        hashed = auth.hash_password(admin_pass)
-        await db.create_user(admin_user, hashed)
-        print(f"[startup] Created admin user: {admin_user}")
+    existing = await db.get_user_by_username(admin_user)
+    if existing:
+        if existing.get("role") != "admin":
+            await db.update_user(existing["id"], role="admin")
+            print(f"[startup] Promoted {admin_user} to admin role")
+    else:
+        if await db.count_users() == 0:
+            hashed = auth.hash_password(admin_pass)
+            await db.create_user(admin_user, hashed, role='admin')
+            print(f"[startup] Created admin user: {admin_user}")
 
 
 def _cleanup_stale_temp() -> None:
@@ -97,6 +103,17 @@ class LoginRequest(BaseModel):
 class RegisterRequest(BaseModel):
     username: str
     password: str
+
+
+class CreateUserRequest(BaseModel):
+    username: str
+    password: str
+    role: str = 'standard'
+
+
+class UpdateUserRequest(BaseModel):
+    role: Optional[str] = None
+    password: Optional[str] = None
 
 
 class GenerateRequest(BaseModel):
@@ -132,8 +149,8 @@ async def login(req: LoginRequest):
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Incorrect username or password",
         )
-    token = auth.create_access_token(req.username)
-    return {"access_token": token, "token_type": "bearer"}
+    token = auth.create_access_token(req.username, user.get("role", "standard"), user.get("id", ""))
+    return {"access_token": token, "token_type": "bearer", "role": user.get("role", "standard")}
 
 
 @app.post("/auth/register", status_code=201)
@@ -147,9 +164,68 @@ async def register(req: RegisterRequest):
     if len(req.password) < 8:
         raise HTTPException(status_code=400, detail="Password must be at least 8 characters")
     hashed = auth.hash_password(req.password)
-    await db.create_user(req.username, hashed)
-    token = auth.create_access_token(req.username)
-    return {"access_token": token, "token_type": "bearer"}
+    uid = await db.create_user(req.username, hashed, role='admin')
+    token = auth.create_access_token(req.username, 'admin', uid)
+    return {"access_token": token, "token_type": "bearer", "role": "admin"}
+
+
+# ─── USER MANAGEMENT (admin only) ────────────────────────────────────────────
+
+@app.get("/users")
+async def list_users(_admin: dict = Depends(auth.require_admin)):
+    users = await db.list_users()
+    for u in users:
+        if u.get("created_at") is not None:
+            u["created_at"] = str(u["created_at"])
+    return users
+
+
+@app.post("/users", status_code=201)
+async def create_user_endpoint(req: CreateUserRequest, _admin: dict = Depends(auth.require_admin)):
+    if req.role not in ("admin", "standard"):
+        raise HTTPException(status_code=400, detail="Role must be 'admin' or 'standard'")
+    if len(req.password) < 8:
+        raise HTTPException(status_code=400, detail="Password must be at least 8 characters")
+    if await db.get_user_by_username(req.username):
+        raise HTTPException(status_code=409, detail="Username already taken")
+    hashed = auth.hash_password(req.password)
+    uid = await db.create_user(req.username, hashed, role=req.role)
+    return {"id": uid, "username": req.username, "role": req.role}
+
+
+@app.patch("/users/{user_id}")
+async def update_user_endpoint(
+    user_id: str,
+    req: UpdateUserRequest,
+    _admin: dict = Depends(auth.require_admin),
+):
+    updates: dict = {}
+    if req.role is not None:
+        if req.role not in ("admin", "standard"):
+            raise HTTPException(status_code=400, detail="Role must be 'admin' or 'standard'")
+        updates["role"] = req.role
+    if req.password is not None:
+        if len(req.password) < 8:
+            raise HTTPException(status_code=400, detail="Password must be at least 8 characters")
+        updates["password_hash"] = auth.hash_password(req.password)
+    if not updates:
+        raise HTTPException(status_code=400, detail="Nothing to update")
+    ok = await db.update_user(user_id, **updates)
+    if not ok:
+        raise HTTPException(status_code=404, detail="User not found")
+    return {"ok": True}
+
+
+@app.delete("/users/{user_id}", status_code=204)
+async def delete_user_endpoint(
+    user_id: str,
+    admin: dict = Depends(auth.require_admin),
+):
+    if user_id == admin["id"]:
+        raise HTTPException(status_code=400, detail="Cannot delete your own account")
+    ok = await db.delete_user(user_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="User not found")
 
 
 # ─── UPLOAD ENDPOINT ──────────────────────────────────────────────────────────

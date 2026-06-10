@@ -11,7 +11,7 @@ from typing import Optional
 
 from docx import Document
 from docx.enum.text import WD_ALIGN_PARAGRAPH
-from docx.enum.table import WD_ALIGN_VERTICAL, WD_TABLE_ALIGNMENT
+from docx.enum.table import WD_ALIGN_VERTICAL, WD_TABLE_ALIGNMENT, WD_ROW_HEIGHT_RULE
 from docx.oxml.ns import qn
 from docx.oxml import OxmlElement
 from docx.shared import Inches, Pt, RGBColor, Cm
@@ -168,10 +168,8 @@ def add_run(para, text: str, bold=False, color=None, size_pt=10, font="Cambria")
     return run
 
 
-def hdr_cell(table_cell, text: str, rgb: tuple = None, size_pt=10, bold=True, font="Cambria"):
-    """Style a cell as a header (blue bg, white text)."""
-    if rgb is None:
-        rgb = (0x0F, 0x4C, 0x75)
+def hdr_cell(table_cell, text: str, rgb: tuple = (0x8E, 0xAA, 0xDB), size_pt=10, bold=True, font="Cambria", text_color=None):
+    """Style a cell as a header (light blue bg, dark text by default)."""
     set_cell_bg(table_cell, rgb)
     set_cell_border(table_cell)
     set_cell_margins(table_cell)
@@ -181,12 +179,12 @@ def hdr_cell(table_cell, text: str, rgb: tuple = None, size_pt=10, bold=True, fo
     run.bold = bold
     run.font.name = font
     run.font.size = Pt(size_pt)
-    run.font.color.rgb = WHITE
+    run.font.color.rgb = text_color if text_color is not None else BLACK
     set_cell_valign(table_cell)
     return table_cell
 
 
-def data_cell(table_cell, text: str, size_pt=9, bold=False, font="Cambria", bg_rgb=None):
+def data_cell(table_cell, text: str, size_pt=9, bold=False, font="Cambria", bg_rgb=None, text_color=None):
     """Style a cell as a data cell."""
     if bg_rgb:
         set_cell_bg(table_cell, bg_rgb)
@@ -199,7 +197,7 @@ def data_cell(table_cell, text: str, size_pt=9, bold=False, font="Cambria", bg_r
     run.bold = bold
     run.font.name = font
     run.font.size = Pt(size_pt)
-    run.font.color.rgb = BLACK
+    run.font.color.rgb = text_color if text_color is not None else BLACK
     set_cell_valign(table_cell)
     return table_cell
 
@@ -702,10 +700,41 @@ def add_findings_section(doc: Document, report_data: dict, dbs_data: list, mode:
             _push_sec_content(doc, sec, cover_db_name, (0x0F, 0x4C, 0x75), inline_title=False)
 
 
+def _transform_redo_columns(columns, rows):
+    """Normalize redo_log_switches columns:
+    - Drop 'Day' if a separate 'Date' column also exists
+    - Rename 'Day / Time' or 'Date' → 'Day'
+    - Strip time portion from Day column values (keep date part only)"""
+    cols = list(columns)
+    data = [list(r) for r in rows]
+
+    if 'Day' in cols and 'Date' in cols:
+        drop_idx = cols.index('Date')
+        cols.pop(drop_idx)
+        data = [r[:drop_idx] + r[drop_idx + 1:] for r in data]
+
+    for i, c in enumerate(cols):
+        if c in ('Day / Time', 'Date'):
+            cols[i] = 'Day'
+            break
+
+    if 'Day' in cols:
+        day_idx = cols.index('Day')
+        for row in data:
+            if day_idx < len(row):
+                val = str(row[day_idx] or '').strip()
+                row[day_idx] = val.split()[0] if val else val
+
+    return cols, data
+
+
 def _push_sec_content(doc: Document, sec: dict, caption_db: str, color_rgb: tuple, inline_title: bool):
     content_type = sec.get("contentType") or ("image" if sec.get("id") == "cpu" else "table")
-    columns = sec.get("tableColumns") or []
-    rows = sec.get("tableRows") or []
+    is_redo = sec.get("id") == "redo"
+    columns = list(sec.get("tableColumns") or [])
+    rows = [list(r) for r in (sec.get("tableRows") or [])]
+    if is_redo:
+        columns, rows = _transform_redo_columns(columns, rows)
 
     if content_type in ("table", "table+image") and columns and rows:
         n_cols = len(columns)
@@ -720,18 +749,41 @@ def _push_sec_content(doc: Document, sec: dict, caption_db: str, color_rgb: tupl
             # Merge across all columns
             for i in range(1, n_cols):
                 title_cell = title_cell.merge(tbl.rows[0].cells[i])
-            hdr_cell(title_cell, caption_db, rgb=color_rgb, size_pt=11, bold=True)
+            hdr_cell(title_cell, caption_db, rgb=color_rgb, size_pt=11, bold=True, text_color=WHITE)
             start_row = 1
 
         col_row = tbl.rows[start_row]
         for i, col_name in enumerate(columns):
-            hdr_cell(col_row.cells[i], col_name, rgb=color_rgb)
+            hdr_cell(col_row.cells[i], col_name, size_pt=7)
 
+        key_color = RGBColor(*color_rgb)
         for r_idx, row_data in enumerate(rows):
             tbl_row = tbl.rows[start_row + 1 + r_idx]
             for c_idx, cell_val in enumerate(row_data):
                 if c_idx < n_cols:
-                    data_cell(tbl_row.cells[c_idx], str(cell_val or ""))
+                    if c_idx < 2:
+                        data_cell(tbl_row.cells[c_idx], str(cell_val or ""), size_pt=7, bold=True, text_color=key_color)
+                    else:
+                        data_cell(tbl_row.cells[c_idx], str(cell_val or ""), size_pt=7)
+
+        if is_redo:
+            REDO_DAY_W  = Inches(0.54)
+            REDO_HR_W   = Inches(0.19)
+            REDO_TOT_W  = Inches(0.53)
+            REDO_ROW_H  = Inches(0.12)
+            for row_idx, tbl_row in enumerate(tbl.rows):
+                tbl_row.height = REDO_ROW_H
+                tbl_row.height_rule = WD_ROW_HEIGHT_RULE.EXACTLY
+                is_title_row = inline_title and row_idx == 0
+                for c_idx, cell in enumerate(tbl_row.cells):
+                    set_cell_margins(cell, top=0, bottom=0, left=20, right=20)
+                    if not is_title_row:
+                        if c_idx == 0:
+                            cell.width = REDO_DAY_W
+                        elif c_idx == n_cols - 1:
+                            cell.width = REDO_TOT_W
+                        else:
+                            cell.width = REDO_HR_W
 
         doc.add_paragraph()
 

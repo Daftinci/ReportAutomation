@@ -20,6 +20,7 @@ export default defineConfig({
       '/reports':  { target: process.env.VITE_API_URL ?? 'http://localhost:8000', changeOrigin: true },
       '/generate': { target: process.env.VITE_API_URL ?? 'http://localhost:8000', changeOrigin: true },
       '/health':   { target: process.env.VITE_API_URL ?? 'http://localhost:8000', changeOrigin: true },
+      '/users':    { target: process.env.VITE_API_URL ?? 'http://localhost:8000', changeOrigin: true },
     },
   },
 })
