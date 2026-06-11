@@ -23,7 +23,7 @@ Oracle DBA health-check report automation tool. Upload Oracle diagnostic snapsho
 ## Prerequisites
 
 - [Docker Desktop](https://www.docker.com/products/docker-desktop/)
-- [Anaconda](https://www.anaconda.com/) with a `Python 3.13` conda env named `Automation`
+- Python 3.13
 - Node.js 20+
 
 ## Getting Started
