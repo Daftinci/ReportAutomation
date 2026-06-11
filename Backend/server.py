@@ -516,7 +516,7 @@ async def generate(
         payload["meta"] = {}
 
     try:
-        docx_bytes = build_report(payload)
+        docx_bytes = await asyncio.to_thread(build_report, payload)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
